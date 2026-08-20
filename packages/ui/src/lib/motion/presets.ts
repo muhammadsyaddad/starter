@@ -6,7 +6,6 @@ export type MotionPreset = {
   id: MotionPresetId;
   label: string;
   description: string;
-  /** `null` = animate nothing; components take the instant path. */
   transition: Transition | null;
 };
 

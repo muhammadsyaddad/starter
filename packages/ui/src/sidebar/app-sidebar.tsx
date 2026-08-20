@@ -120,7 +120,6 @@ export function AppSidebar({
       </SidebarHeader>
 
       <TreeUIProvider value={ui}>
-        {/* Right-click on empty space creates at the root; so does a drop. */}
         <ContextMenu>
           <SidebarContent className="px-1.5 py-2">
             <TreeItemList

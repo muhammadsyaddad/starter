@@ -1,4 +1,4 @@
-import { LucideIcon, FileText, Home } from "lucide-react";
+import { LucideIcon, FileText, Home, Folder } from "lucide-react";
 
 export interface NavSubPage {
   id: string;
@@ -33,6 +33,7 @@ export const navigationData: NavGroup[] = [
       },
     ],
   },
+  // example if the group
   // {
   //   // GROUPED: Memiliki Header Label "Manajemen Berkas"
   //   id: "group-files",
