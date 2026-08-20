@@ -18,7 +18,7 @@ export function SidebarSearch({
         onChange={(e) => onChange(e.target.value)}
         placeholder="Cari…"
         aria-label="Cari berkas"
-        className="h-7 bg-sidebar-accent/60 pr-7 pl-7 text-xs shadow-none focus-visible:ring-1"
+        className="h-7 bg-sidebar-accent/60 pr-7 pl-7 text-xs  shadow-none focus-visible:ring-1"
       />
       {value && (
         <button

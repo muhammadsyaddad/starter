@@ -35,10 +35,7 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
             <SidebarTrigger />
           </header>
 
-          <div className="flex-1 overflow-y-auto p-4">
-            {/* children di sini adalah page.tsx kita nantinya */}
-            {children}
-          </div>
+          <div className="flex-1 overflow-y-auto p-4">{children}</div>
         </SidebarInset>
       </SidebarProvider>
     </SidebarContext.Provider>

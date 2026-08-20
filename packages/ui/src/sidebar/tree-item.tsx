@@ -64,7 +64,6 @@ export function TreeItemList({
       <>
         {filteredNav.map((group) => (
           <SidebarGroup key={group.id} className="p-0 mb-3">
-            {/* Jika group memiliki title, tampilkan sebagai Label Grouped */}
             {group.title && (
               <SidebarGroupLabel className="px-2 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
                 {group.title}
@@ -82,10 +81,10 @@ export function TreeItemList({
                         asChild
                         isActive={isActive}
                         onClick={() => onSelect?.(item.id)}
-                        className="h-8 gap-2 rounded-md px-2 text-xs font-normal"
+                        className="h-8 gap-3 px-2 text-x font-medium"
                       >
                         <Link href={item.path}>
-                          <Icon className="size-4 shrink-0 opacity-70" />
+                          <Icon className="size-4 shrink-0 " />
                           <span className="truncate">{item.name}</span>
                         </Link>
                       </SidebarMenuButton>
@@ -101,7 +100,7 @@ export function TreeItemList({
   }
 
   return (
-    <SidebarMenu className={className ?? "gap-0"}>
+    <SidebarMenu className={className}>
       <AnimatePresence initial={false}>
         {nodes.map((node) => (
           <TreeItem key={node.id} node={node} level={level} />
