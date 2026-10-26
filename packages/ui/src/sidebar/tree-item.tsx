@@ -83,7 +83,7 @@ export function TreeItemList({
                         onClick={() => onSelect?.(item.id)}
                         className="h-8 gap-3 px-2 text-x font-medium"
                       >
-                        <Link href={item.path}>
+                        <Link href={item.path ?? item.href ?? "#"}>
                           <Icon className="size-4 shrink-0" weight="fill" />
                           <span className="truncate">{item.name}</span>
                         </Link>

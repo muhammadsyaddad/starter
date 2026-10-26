@@ -143,9 +143,16 @@
         "@types/react-dom": "19.2.2",
         "eslint": "^9.39.1",
         "happy-dom": "^20.9.0",
+        "next": "16.2.0",
         "typescript": "5.9.2",
         "vitest": "^4.1.6",
       },
+      "peerDependencies": {
+        "next": ">=16",
+      },
+      "optionalPeers": [
+        "next",
+      ],
     },
   },
   "trustedDependencies": [
