@@ -1,11 +1,12 @@
-import { LucideIcon } from "lucide-react";
+import type { Icon } from "@phosphor-icons/react";
 
 export interface NavSubPage {
   id: string;
   name: string;
-  icon?: LucideIcon;
+  icon?: Icon;
   href?: string;
   path?: string;
+  children?: NavSubPage[];
 }
 
 export interface NavGroup {

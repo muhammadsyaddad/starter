@@ -1,0 +1,27 @@
+{
+  "name": "built",
+  "version": "0.1.0",
+  "description": "Pelintir dashboard desktop app",
+  "author": "Pelintir <it.ramus2026@gmail.com>",
+  "homepage": "https://ramus.asia",
+  "desktopName": "pelintir.desktop",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "dev": "tsc -p . && ELECTRON_DEV_URL=http://localhost:3001 electron .",
+    "start": "tsc -p . && electron .",
+    "prepare-server": "node scripts/prepare-server.mjs",
+    "dist:linux": "bun run prepare-server && bun run build && electron-builder --linux",
+    "dist:win": "bun run prepare-server && bun run build && electron-builder --win",
+    "check-types": "tsc -p . --noEmit"
+  },
+  "devDependencies": {
+    "@repo/typescript-config": "*",
+    "@types/node": "^22.15.3",
+    "electron": "^38.2.0",
+    "electron-builder": "^26.0.12",
+    "typescript": "5.9.2"
+  }
+}

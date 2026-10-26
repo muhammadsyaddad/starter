@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { HexagonIcon } from "@phosphor-icons/react";
 import { ContextMenu, ContextMenuContent } from "../ui/context-menu";
 import {
   Sidebar,
@@ -11,7 +12,6 @@ import {
 } from "../ui/sidebar";
 import { RootMenuItems } from "./node-context-menu";
 import { SidebarFooterActions } from "./sidebar-footer-actions";
-import { SidebarSearch } from "./sidebar-search";
 import { TreeItemList } from "./tree-item";
 import { TreeUIProvider, type TreeUI } from "./tree-ui-context";
 import { useTreeAdapter } from "./tree-provider";
@@ -20,7 +20,6 @@ import { useTree } from "../hooks/use-tree";
 import { useTreeDnd } from "../hooks/use-tree-dnd";
 import { useTreeSelection } from "../hooks/use-tree-selection";
 import { buildVisibleOrder } from "../lib/tree/build-tree";
-import { filterNodes } from "../lib/tree/filter";
 import type { NodeKind } from "../lib/tree/types";
 import type { NavGroup } from "../lib/constant";
 
@@ -42,29 +41,13 @@ export function AppSidebar({
   const { nodes, tree } = useTree();
   const motion = useMotionConfig();
 
-  const [query, setQuery] = React.useState("");
   const [renamingId, setRenamingId] = React.useState<string | null>(null);
 
-  const filter = React.useMemo(
-    () => (nodes ? filterNodes(nodes, query) : null),
-    [nodes, query],
-  );
-  const filteredNav = React.useMemo(() => {
-    if (!query) return navigationData;
-    return navigationData
-      .map((group) => ({
-        ...group,
-        items: group.items.filter((item) =>
-          item.name.toLowerCase().includes(query.toLowerCase()),
-        ),
-      }))
-      .filter((group) => group.items.length > 0);
-  }, [query, navigationData]);
-
-  const filterVisible = filter?.visible ?? null;
+  // No search in the header, so nothing is ever filtered out.
+  const filterVisible = null;
   const visibleOrder = React.useMemo(
     () => buildVisibleOrder(tree, filterVisible),
-    [tree, filterVisible],
+    [tree],
   );
 
   const selection = useTreeSelection(nodes, visibleOrder);
@@ -115,7 +98,8 @@ export function AppSidebar({
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader className="p-[9.5px]">
         <div className="flex items-center gap-1.5">
-          <SidebarSearch value={query} onChange={setQuery} />
+          {/* Placeholder until the real company logo exists. */}
+          <HexagonIcon className="size-7 text-sidebar-primary" weight="fill" />
         </div>
       </SidebarHeader>
 
@@ -125,8 +109,7 @@ export function AppSidebar({
             <TreeItemList
               nodes={tree}
               level={0}
-              filteredNav={filteredNav}
-              query={query}
+              filteredNav={navigationData}
               onSelect={onSelect}
             />
           </SidebarContent>

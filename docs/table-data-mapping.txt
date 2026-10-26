@@ -1,0 +1,1133 @@
+================================================================================
+ TABLE DATA MAPPING — wire starter dashboard tables to the real ramus-be-erp API
+ Companion of: table-row-specs.txt (same ids T01..T39, G1..G3)
+ Generated: 2026-10-23
+================================================================================
+
+0. PURPOSE / HOW TO USE
+--------------------------------------------------------------------------------
+The new UI already mimics every table in table-row-specs.txt but runs on static
+mock rows. This file says, per table, where the real data comes from and how to
+map it. Read table-row-specs.txt for columns/behaviour, read this file for data.
+
+Repos:
+  NEW UI (target, edit here) : /home/syaddad/github_repo/starter/apps/dashboard
+                               Next 16, React 19, bun + turbo, shadcn via @repo/ui
+  BACKEND (read, Go/gin)     : /home/syaddad/github_repo/ramus/ramus-be-erp
+                               routes   internal/routes/router.go
+                               handlers internal/handler/*.go
+                               DTOs     internal/models/*_dto.go  (json tags = truth)
+                               swagger  docs/swagger.json (partial, cross-ref only)
+  OLD UI (reference only)    : /home/syaddad/github_repo/ramus/ramus-dashboard-fe/src
+                               services/*.ts, hooks/*.ts, types/*.ts
+                               DO NOT port old services as-is — many bugs (Section 5).
+
+Rules for the implementing agent:
+  - Write a fresh, small API layer in the starter (Section 1 + 2).
+  - Keep mock fallback: when API env is unset, tables keep their mock rows.
+  - Tables with no backend keep mock (Section 4). Do not invent endpoints in FE.
+  - Do not change the Go backend unless a task says so. Work around quirks.
+  - Match starter code style (terse, lib/enums.ts, components/cells.tsx helpers).
+
+Notation (extra to table-row-specs.txt):
+  BE        path relative to /api (backend). FE calls it as /be-api/<path>.
+  perm X/a  RequirePermission("PAGE","X",a) — a = R(1) W(2) D(4) X(8)
+  env(a)    response envelope style a|b|c (Section 1.4)
+  *         required field in request body (binding:"required")
+  ?         optional / nullable / pointer field
+  STARTER   [BUILT file#Component] or [NOT BUILT]
+  GAP       row field with no API source
+  QUIRK     backend behaviour to work around (also in Section 5)
+
+
+================================================================================
+1. HTTP CONTRACT (applies to every table)
+================================================================================
+
+1.1 Proxy / base URL
+  Go CORS allows only :3000 :5173 :8080 + railway prod. Starter runs on :3001.
+  -> Do NOT call the backend from the browser directly. Add a Next rewrite:
+
+     // starter/apps/dashboard/next.config.js
+     rewrites: async () => [
+       { source: "/be-api/:path*", destination: `${process.env.API_ORIGIN}/api/:path*` },
+     ]
+
+  Use prefix /be-api, NOT /api — starter owns app/api/mcp/route.ts.
+  Env:
+    API_ORIGIN               server-side, default http://localhost:8080
+                             (prod: https://ramus-erp-be-production.up.railway.app)
+    NEXT_PUBLIC_USE_API      "1" = real API; unset = mock rows (replaces current
+                             NEXT_PUBLIC_API_URL switch in lib/api.ts)
+    NEXT_PUBLIC_TELEMETRY_URL telemetry service for dev tools (T38/T39), default
+                             https://tel-api.ramus.asia (separate service, see T38)
+
+  Image URLs: BE returns ABSOLUTE urls built from its own BASE_URL
+  (e.g. http://localhost:8080/api/inventory/tools/transactions/photos/<id>).
+  Rewrite: take substring after "/api/" and prefix "/be-api/". Or build from id:
+    /be-api/inventory/tools/<toolId>/image
+    /be-api/inventory/tools/transactions/photos/<photoId>
+  These image endpoints are PUBLIC (no token) so <img src> works.
+
+1.2 Auth (JWT)
+  POST /auth/login            public
+    body   { email*, password* }
+    200    { accessToken, refreshToken, access: { pages:{KEY:int}, components:{KEY:int} } }
+           NOTE: no "user" key. Call /auth/me right after login.
+    401    { error: "invalid email or password" }
+    500    { error: "user is inactive" }   (QUIRK: inactive = 500, show message)
+  GET /auth/me                JWT
+    200    { data: { id, username, email, fullName, role:{id,name}, status,
+                     division?:{id,name} }, access: { pages, components } }
+  POST /auth/refresh          public
+    body   { refreshToken* }
+    200    { accessToken, refreshToken }      <- refresh token ROTATES
+    401    { error: "invalid refresh token" }
+    MUST store the NEW refreshToken every time (old FE didn't -> forced logout on
+    2nd refresh). No access map in refresh response (keep previous one / re-call me).
+  PATCH /auth/profile         JWT  { fullName?, email?, currentPassword*, newPassword? }
+                                   -> { data:<me.data>, message }
+  POST /auth/register         perm USERS/W (not needed by tables)
+
+  Lifetimes: access 24h, refresh 7d (Redis). JWT claims: user_id, username,
+  role_id, role_name, exp. No email claim.
+
+  Client behaviour to build:
+    - store accessToken + refreshToken (localStorage) + mirror access token in
+      cookie "auth_token" so Next 16 `proxy.ts` can redirect unauthenticated
+      requests to /login
+    - every request: Authorization: Bearer <access>
+    - on 401 (not /auth/login): ONE in-flight refresh, queue other 401s, retry
+      each once; refresh fails -> clear storage + cookie -> /login
+    - login page: email + password form -> login -> me -> store user + access ->
+      redirect to "/"
+    - logout: clear storage + cookie (no BE logout endpoint)
+
+1.3 Permissions (RBAC bitmask)
+  READ=1 WRITE=2 DELETE=4 EXECUTE=8.  can(key,a) = (access.pages[key] & a) === a
+  Missing key = no access. Old FE also tolerated key case (upper/lower) — do same.
+  PAGE keys used by router: USERS ROLE_MANAGEMENT DIVISION SHIP_MANAGEMENT
+    INSTALLATION PROBLEM MAINTENANCE DEVICE TOOLS COMPANY GROUP DOCUMENTATION
+    TEMPLATE_BUILDER GENERATE_DOCUMENT PROJECTS
+  Keys seeded but unused by routes: FINANCE PERMISSION TECHNICIAN DEV_TOOLS
+  403 body: { error:"forbidden: your role does not have access to this resource",
+              role, resource, action }
+  Use can() to: hide sidebar items, hide Add button, hide edit/delete per row,
+  guard pages. Spec "perm R/A" annotations == these keys.
+
+1.4 Response envelopes (THREE styles — normalize once)
+  (a) { success:true, data, meta? }            errors { success:false, message }
+      companies, groups, ships, ship-devices, ship-items, borrowed-tools,
+      devices, tools, documentation, folders, templates, submissions
+  (b) { meta, data }  (no success key)          errors { error, details? }
+      users, divisions, division members, permissions, installations,
+      maintenances, projects, surveys
+      (installation/maintenance/project/survey DETAIL/CREATE/UPDATE return the
+       bare object, no envelope)
+  (c) bare array / bare object
+      GET role, GET role/:id, role/:id/permission, GET alerts, comments,
+      edit-histories, permission search, user search, installations/summary,
+      division member detail/update
+
+  meta = { total:int, page:int, limit:int, total_pages:int }
+         total_pages is 0 for users, divisions, devices, companies, groups,
+         ships, documentation -> compute ceil(total/limit) yourself.
+  data may be JSON null instead of [] (tools, tool transactions, templates,
+  folder docs, role/:id/permission) -> coerce to [].
+
+  Write:
+    unwrap(json) -> { data, meta }  : json.data ?? json  (array/object) ;
+                                     meta = json.meta
+    errorText(json)                 : json.error ?? json.message ?? statusText
+  Delete success bodies vary ({message} | {success,data:{message}} |
+  {success,message}) -> treat any 2xx as success, ignore body.
+
+1.5 Pagination / fetch-all
+  Starter DataTable paginates CLIENT-side. Backend defaults silently cap lists
+  (limit default 10 or 20; old FE never paged -> showed max 10/20 rows).
+  Phase 1: fetchAll(path, params) = loop page=1.. with limit=100 until
+           collected >= meta.total (or page returned < limit). Endpoints with
+           no meta: single call.
+  documentation: limit >100 is RESET to 10 -> use limit=100.
+  templates: limit=0 crashes (divide by zero) -> always send limit.
+  Phase 2 (later, optional): server mode for documentation (T32/T33) only.
+
+1.6 Search / sort / filter conventions
+  - Separate search endpoints, param `keyword`: users, divisions, companies,
+    groups, ships (all `/…/search`). permissions search uses `name`.
+  - documentation: `search`, `sort_title`, `sort_date` (asc|desc).
+  - tools requests: `search`, `sort_name`, `sort_date`(latest|oldest), `date`.
+  - installations / maintenances: only `sort_order`(asc|desc on created_at),
+    `ship_id`, maintenances also `maintenance_type`.
+  - projects / surveys: `sort` (asc|desc on created_at), surveys `ship_id`.
+  - Everything else (status/type filters, A-Z sort) = client-side.
+  Phase 1: since we fetchAll, do search/filter/sort client-side everywhere
+  (matches starter DataTable). Exact-match filters (spec 5.1).
+
+1.7 Dates
+  Go time.Time -> RFC3339 ("2026-10-20T07:30:00Z"); date-only columns come as
+  "YYYY-MM-DD" (installation/maintenance/project) or "YYYY-MM-DDT00:00:00Z"
+  (tool borrow_date/return_date). Keep RAW value in the row, format in the cell
+  (cells.tsx fmtDate + DATETIME/DATE_MDY/DATE_DMY/DATE_SHORT). Old FE converted
+  to "dd/mm/yyyy" strings in mappers -> broke sort. Don't.
+  Null date -> "" in row, cell shows "-".
+
+1.8 Enum normalization (BE raw <-> starter lib/enums.ts key)
+  Normalize in fromApi, de-normalize in toApi (send what the old UI wrote).
+  domain / field                 BE raw values              starter key        write back
+  user.status                    active|inactive            "Active"|"Inactive" lowercase
+                                                            (starter T01 uses capitalized keys)
+  division member status         "Active"|"Inactive"        ACTIVE_INACTIVE    "Active"/"Inactive"
+  company.status                 "Active"|"Inactive" (free) active|inactive    "Active"/"Inactive"
+  ship.status                    "Active"|"Inactive" (free) active|inactive    "Active"/"Inactive"
+  ship.type                      "FMS"|"EMS" (free)         fms|ems (SHIP_TYPE) "FMS"/"EMS"
+  ship device/item status        "Active"|"Inactive"        active|inactive    "Active"/"Inactive"
+  device.status                  "Active"|"Inactive"        active|inactive    "Active"/"Inactive"
+  tool.availability              available|unavailable      starter uses "available"|"not available"
+                                                            -> change starter AVAILABILITY to
+                                                               {available, unavailable}
+  tool tx status                 pending on_loan declined return_pending returned
+                                 returned_broke return_rejected      (TX_STATUS, add to enums.ts)
+  borrow request status          + partially_approved (overall, BE computed)
+  installation.status            scheduled|finish|in_progress|canceled (validated, lowercase)
+                                 starter INSTALL_STATUS keys "Scheduled"|"Finish"|"In Progress"|
+                                 "Canceled"|"Pending" -> map: scheduled->Scheduled finish->Finish
+                                 in_progress->"In Progress" canceled->Canceled ; write lowercase.
+                                 "Pending" never exists in BE.
+  installation.tipe              "FMS"|"EMS" (free)
+  maintenance.status             in_queue in_progress scheduled completed forwarded canceled
+                                 (free text, == starter MAINT_STATUS keys) ; "Finish" label = completed
+  maintenance.tipe               CORRECTIVE|PREVENTIVE (== MAINT_TYPE)
+  maintenance.maintenance_type   remote|dispatch (channel, MAINT_CHANNEL)
+  maintenance.severity           URGENT|PRIORITY|NEGLECTIBLE
+  project/survey.status          free text; UI uses "Not Started"|"On Progress"|"Done"|"Canceled"
+  doc status                     PENDING|ONGOING|FINISHED (== DOC_STATUS)
+  doc_type                       CA|FSR|BA|FINANCE|DRAFT (free text, unknown -> muted badge)
+  template status                draft|published (lowercase)
+  permission resource_type       PAGE|COMPONENT
+  Always compare case-insensitively when normalizing.
+
+
+================================================================================
+2. STARTER INTEGRATION SEAM
+================================================================================
+Current (starter/apps/dashboard):
+  lib/api.ts            useResource(resource, mock) — naive REST, no auth
+  components/data-table.tsx
+                        DataTable (client search/filter/sort/paginate, built-in
+                        add/edit FormDialog from `fields`, detail link, `can`)
+                        ResourceTable = DataTable + useResource
+  components/cells.tsx  index text truncate join twoLine badge dot date idr avatar
+                        fmtDate dueDateInfo initials
+  lib/enums.ts          ACTIVE_INACTIVE ROLE MAINT_TYPE MAINT_STATUS INSTALL_STATUS
+                        DOC_TYPE DOC_STATUS SHIP_TYPE
+  components/tables/*.tsx  each table = type + mock[] + <ResourceTable resource=…>
+
+Build:
+  lib/http.ts       request(path, init) -> fetch(`/be-api/${path}`), Bearer,
+                    401-refresh-retry, unwrap, errorText ; json + multipart
+                    (FormData: don't set Content-Type) ; fetchAll(path, params)
+  lib/auth.ts       login/logout/me, token storage, AuthProvider + useAuth(),
+                    can(key, action) from access map
+  app/login/page.tsx, proxy.ts (Next 16 middleware) redirect if no cookie
+  lib/resources/<domain>.ts   one ADAPTER per table:
+      type Adapter<Row, Raw = unknown> = {
+        list: () => Promise<Row[]>           // usually fetchAll + map(fromApi)
+        get?: (id: string) => Promise<Row>
+        create?: (row: Partial<Row>) => Promise<Row | void>
+        update?: (row: Row) => Promise<Row | void>
+        remove?: (row: Row) => Promise<void>  // ROW not id: some need short id
+        fromApi: (raw: Raw) => Row
+        toApi?: (row: Partial<Row>) => unknown // JSON body or FormData
+        perm?: string                          // PAGE key for can()
+      }
+  lib/api.ts        useResource(adapter, mock): if !NEXT_PUBLIC_USE_API -> mock;
+                    else list() on mount, refetch after save/remove (simplest
+                    correct; BE responses for create/update are inconsistent).
+  ResourceTable     prop `resource` becomes `adapter`; pass can() from
+                    adapter.perm into DataTable `can` + hide addLabel when !W.
+
+DataTable features the mapping needs but starter lacks (add when wiring the
+tables that need them):
+  - custom row actions (label, onClick, visibleIf, confirm, perm): Forward (T25),
+    Approve/Decline/Return (T14), Restore (T33), Use Template (T34), Details
+    modal (T26), Edit members (T03)
+  - row selection + bulk actions (T05, T12, T14)
+  - page-level selects that change the query (T15 group, T17 company)
+  - custom form dialogs (renderDialog already exists) for multipart forms,
+    nested selects (company -> ship), technician tag input, item grids (G1-G3)
+Starter detail routes differ from old (/ship-data/... vs
+/ship-data-management/...) — keep the starter's routes.
+
+================================================================================
+3. PER-TABLE MAPPING
+================================================================================
+OLD = ramus-dashboard-fe/src ; PAGES = OLD/app/(main)/dashboard
+
+------------------------------ USER MANAGEMENT ---------------------------------
+
+[T01] Users
+  STARTER  [BUILT components/tables/user-management.tsx#UsersTable]
+  OLD      PAGES/user-management/users/page.tsx (mapper 40-75) ; services/userService.ts
+  LIST     GET user-management/user?page&limit       perm USERS/R   env(b)
+           BE reads only page (1), limit (20). No order, no search params.
+           -> fetchAll. (search endpoint user-management/user/search?keyword=
+              returns bare array max 50 — not needed in phase 1)
+  RAW      { id, username, email, fullName, role_id, role (name string, ""),
+             division (name string, ""), status ("active"|"inactive") }
+  MAP      id <- id
+           name <- fullName || username
+           email <- email
+           role <- role (string; display as-is — ROLE enum keys are names like
+                   "SUPER ADMIN"; unknown role -> plain badge)
+           division <- division || "-"
+           status <- status.toLowerCase()==="active" ? "Active" : "Inactive"
+           lastLogin  GAP — BE has no last-login. Show "-". Drop the
+                      Newest/Oldest Login sort (spec 5.6).
+  FILTERS  Role options     <- GET user-management/dropdown-role  perm ROLE_MANAGEMENT/R
+                               env(c-ish) { data:[{id,name}] } sorted name ; value = name
+           Division options <- GET user-management/dropdown-division perm DIVISION/R
+                               { data:[{id,name}] } ; value = name
+           (starter has hardcoded DIVISIONS — replace with dropdown)
+  DETAIL   GET user-management/user/:id   perm USERS/R
+           { data:{ id, username, email, fullName, role_id, role:{id,name,description},
+                    division?:{id,name,...}, status, createdAt, updatedAt } }
+           NOTE no top-level division_id — use data.division?.id (old FE bug).
+  CREATE   POST user-management/user   perm USERS/W   JSON
+           { username*, email*, password*, fullName*, role_id*, division_id?, status? }
+           -> 201 { data:<detail> }
+  UPDATE   PATCH user-management/user/:id   perm USERS/W   JSON, all optional
+           { username, email, password (only if filled), fullName, role_id,
+             division_id ("" clears), status ("active"|"inactive") }
+  DELETE   DELETE user-management/user/:id   perm USERS/D  (soft)
+  FORM     starter fields use role/division NAMES; form must send role_id /
+           division_id -> use dropdown ids as option values in the dialog.
+           Need username + password fields too (not in starter fields).
+
+[T02] Divisions
+  STARTER  [BUILT user-management.tsx#DivisionsTable]
+  OLD      hooks/useDivisions.ts ; services/divisionService.ts
+  LIST     GET user-management/division?page&limit   perm DIVISION/R   env(b)
+           order created_at desc ; default limit 20 -> fetchAll
+           search: GET user-management/division/search?keyword=&page&limit
+                   (old FE sent ?q= -> ignored; use keyword if server search)
+  RAW      { id, name, division_head, description?, status, staff:int, createdAt, updatedAt }
+           staff = member count (+1 if division_head set)
+  MAP      1:1 (id, name, division_head, staff, createdAt raw ISO -> DATE_DMY cell)
+  DETAIL   GET user-management/division/:id -> { data:<same + description> }
+  CREATE   POST user-management/division   perm DIVISION/W   JSON
+           { name*, division_head?, description?, status? }
+  UPDATE   PATCH user-management/division/:id  same keys optional
+  DELETE   DELETE user-management/division/:id  perm DIVISION/D
+  FORM     drop "staff" from starter fields (computed by BE); add description.
+
+[T03] Division Members  (on /user-management/divisions/[id])
+  STARTER  [NOT BUILT]
+  OLD      PAGES/user-management/divisions/[id]/page.tsx ; divisionService.ts:107-156
+  LIST     GET user-management/division/member?division_id=<id>&page&limit
+           perm DIVISION/R  env(b) ; division_id required (400 otherwise)
+           total_pages computed here. No search, no order.
+  RAW      { id, name, position, status ("Active"|"Inactive" as written) }
+  MAP      1:1 ; status lowercased -> ACTIVE_INACTIVE
+  CREATE   POST user-management/division/member   perm DIVISION/W
+           { division_id*, members*: [{ name*, position?, status? }] }  (bulk add)
+           -> { message }
+  UPDATE   PATCH user-management/division/member/:id  { name?, position?, status? }
+           -> bare member object
+  DELETE   DELETE user-management/division/member/:id  perm DIVISION/D
+  DETAIL   GET user-management/division/member/:id -> bare member
+  NOTE     Members are free-text people, NOT users.
+
+[T04] Permissions
+  STARTER  [NOT BUILT]
+  OLD      PAGES/user-management/permissions/page.tsx ; services/permissionService.ts
+  LIST     GET user-management/permission?page&limit   perm ROLE_MANAGEMENT/R  env(b)
+           order name asc ; total_pages computed
+           search: GET user-management/permission/search?name=  -> bare array, max 50
+  RAW      { id, name, resource_type ("PAGE"|"COMPONENT"), resource_identifier }
+           (list has NO action)
+  MAP      1:1 ; empty -> "N/A"
+  DETAIL   GET user-management/permission/:id -> bare { id, name, resource_type,
+           resource_identifier, action:int }
+  CREATE   POST user-management/permission   perm ROLE_MANAGEMENT/W
+           { name*, resource_type* (PAGE|COMPONENT), resource_identifier*,
+             action* (int 1|2|4|8 or "READ"|"WRITE"|"DELETE"|"EXECUTE"; 0 rejected) }
+  UPDATE   PATCH user-management/permission/:id   same keys optional
+  DELETE   DELETE user-management/permission/:id  perm ROLE_MANAGEMENT/D (hard)
+  QUIRK    guarded by ROLE_MANAGEMENT, not PERMISSION key.
+           resource_identifier should be one of the PAGE keys (Section 1.3).
+
+[T05] Role Permission Picker (modal in Roles add/edit)
+  STARTER  [NOT BUILT] (starter Roles form only has name)
+  SOURCE   same endpoints as T04: list (paged) + search?name= (debounced, max 50)
+  ROW      { id, name }  selection Set<id> kept across pages
+  SAVE     sent as permission_ids[] in role create/update (Roles below)
+  PRESET   from GET user-management/role/:id -> permissions[].id
+
+[Roles] Roles list — /user-management/roles  (no spec id)
+  STARTER  [BUILT user-management.tsx#RolesTable]  row {id,name,permissions:number}
+  OLD      PAGES/user-management/roles/page.tsx ; services/roleService.ts
+  LIST     GET user-management/role   perm ROLE_MANAGEMENT/R   env(c) bare array
+           no paging ; order name asc ; permissions preloaded
+  RAW      { id, name, description, permissions?: [{id,name,resource_type,
+             resource_identifier,action:int}] }   (permissions omitted when none)
+  MAP      id, name ; permissions <- (raw.permissions ?? []).length
+           (+ description available — add column/field)
+  DETAIL   GET user-management/role/:id -> bare RoleResponse
+           GET user-management/role/:id/permission -> bare array | null
+  CREATE   POST user-management/role   perm ROLE_MANAGEMENT/W
+           { name*, description*, permission_ids?: uuid[] }  -> 201 bare role
+  UPDATE   PATCH user-management/role/:id { name?, description?, permission_ids? }
+           permission_ids present = REPLACES full set
+  DELETE   DELETE user-management/role/:id   perm ROLE_MANAGEMENT/D
+  FORM     description is REQUIRED on create -> add field. Permission picker = T05.
+  DROPDOWN GET user-management/dropdown-role -> { data:[{id,name}] }
+
+[T06] User Borrowed Tools  (user detail page)
+  STARTER  [NOT BUILT]
+  OLD      users/_components/UserBorrowedToolsSection.tsx
+  SOURCE   GET inventory/tools/requests?page&limit   perm TOOLS/X (EXECUTE!)
+           then flatten data[].transactions[] and match borrower_name
+           (free text) against user fullName/username, case-insensitive contains.
+  GAP      No per-user endpoint. borrower_name is typed by hand -> unreliable.
+           Viewer without TOOLS/X gets 403 -> show empty state.
+           Self only: GET inventory/tools/my-borrowings (current user).
+  ROW      tx: { id, tool_name, quantity_borrowed, borrow_date?|borrowed_at,
+                 return_date?|returned_at?, status }
+  MAP      borrowDate <- borrow_date ?? borrowed_at ; returnDate <- return_date ?? returned_at
+  TABS     History = returned, returned_broke, return_rejected, declined
+           ("cancelled" never exists: cancel deletes the tx)
+
+[T07] User Installation Records
+  STARTER  [NOT BUILT]
+  SOURCE   fetchAll GET ship-data-management/installations (see T23)
+           client filter: technicians[] contains user fullName/username
+  GAP      no technician/user filter in BE.
+  ROW      { id(uuid), startDate<-start_date, shipName<-kapal, location<-lokasi, status }
+  CLICK    -> installation detail by uuid
+
+[T08] User Maintenance Records
+  STARTER  [NOT BUILT]
+  SOURCE   fetchAll GET ship-data-management/maintenances (no maintenance_type -> both
+           channels; see T25) ; client filter technicians contains user name
+  ROW      { id<-maintenance_id (MTN-…), startDate<-mulai, shipName<-kapal,
+             channel<-maintenance_type, problemDescription<-problem, status }
+  MAP      spec "Type" badge = MAINT_CHANNEL = maintenance_type (NOT tipe —
+           old FE bug, every link went to /dispatch)
+  CLICK    -> /maintenance/{channel}/{maintenance_id}
+
+---------------------------------- INVENTORY -----------------------------------
+
+[T09] Devices
+  STARTER  [BUILT components/tables/inventory.tsx#DevicesTable]
+  OLD      PAGES/inventory/devices/page.tsx ; services/inventoryService.ts:62-99
+  LIST     GET inventory/devices?page&limit   perm DEVICE/R   env(a)
+           default limit 10 (!) -> fetchAll ; order created_at desc ; no search
+  RAW      { id, id_device, name, status, qty:int }   (no price/details in list)
+  MAP      1:1 ; status lowercased -> active|inactive
+  DETAIL   GET inventory/devices/:id -> { success, data:{ id, id_device, name,
+           price:int, status, qty, details, created_at, updated_at } }
+  CREATE   POST inventory/devices   perm DEVICE/W   JSON
+           { id_device*, name*, price*:int, status*, qty*:int, details? }
+           QUIRK: gin `required` rejects 0 -> price 0 / qty 0 = 400. Validate >0
+                  in form or warn. Duplicate id_device -> 409.
+  UPDATE   PATCH inventory/devices/:id   all optional (same keys)
+  DELETE   DELETE inventory/devices/:id   perm DEVICE/D  (hard delete)
+  FORM     add price + details fields (starter lacks). Edit dialog should load
+           detail first (list lacks price/details).
+  DROPDOWN GET inventory/dropdown-device -> { success, data:[{id,name,qty}] }
+  PERM     old FE had no checks — use DEVICE.
+
+[T10] Tools
+  STARTER  [BUILT inventory.tsx#ToolsTable]
+  OLD      PAGES/inventory/tools/page.tsx ; inventoryService.ts:108-150 ;
+           _components/EditToolModal.tsx (FormData)
+  LIST     GET inventory/tools?page&limit   perm TOOLS/R   env(a)  data may be null
+           default limit 100 ; order created_at desc ; no search/filter params
+  RAW      { id, id_tool, name, price:int, availability ("available"|"unavailable"),
+             stock:int (owned), qty:int (available now), borrowed_qty:int,
+             details, photo_url ("" | absolute url), created_at, updated_at }
+  MAP      1:1 ; photo_url -> rewrite to /be-api (1.1) ; availability enum fix
+           (starter "not available" -> "unavailable")
+  DETAIL   GET inventory/tools/:id -> { success, data:<same> }   (page /inventory/tools/[id])
+  CREATE   POST inventory/tools   perm TOOLS/W   MULTIPART
+           fields id_tool*, name*, availability*, price, stock, qty (ints as
+           strings), details, file tool_photo?   -> 201 ; dup id_tool 409
+  UPDATE   PATCH inventory/tools/:id  MULTIPART, all optional, "" ignored
+  DELETE   DELETE inventory/tools/:id  perm TOOLS/D (soft)
+  IMAGE    /be-api/inventory/tools/:id/image (public)
+  NOTE     availability is ALSO flipped by BE on borrow/return (qty 0 -> unavailable).
+
+[T11] Tool Transaction History  (/inventory/tools/[id])
+  STARTER  [NOT BUILT]
+  OLD      PAGES/inventory/tools/[id]/page.tsx
+  LIST     GET inventory/tools/:id/transactions   perm TOOLS/R   env(a) data|null
+           no paging ; order borrowed_at desc
+  RAW      ToolTransaction (used by T06 T11 T12 T13 T14 T20):
+           { id, tool_id, tool_name, borrower_name, created_by_id, created_by_name,
+             borrowed_at (always), borrow_date? (set on approve), return_date?,
+             returned_at?, quantity_borrowed:int, status, detail, responsible,
+             borrow_photo_url, return_photo_url (legacy, "" if none),
+             photos: [{ id, type:"borrow"|"return", photo_url }] | null, created_at }
+  MAP      borrowDate <- borrow_date ?? borrowed_at ; returnDate <- return_date ?? returned_at
+           photos: borrow = photos.filter(type=borrow) else borrow_photo_url ;
+                   return = photos.filter(type=return) else return_photo_url
+  EMPTY    "No transactions found for this tool."
+
+[T12] Loan Requests  (/inventory/tools/loan-requests)
+  STARTER  [NOT BUILT]
+  OLD      PAGES/inventory/tools/loan-requests/page.tsx ; inventoryService.ts:279
+  LIST     GET inventory/tools/requests   perm TOOLS/X   env(a) meta.total_pages ok
+           params page(1) limit(100) sort_name(asc|desc, borrower_name)
+                  sort_date(latest|oldest, created_at) date(YYYY-MM-DD)
+                  search (borrower_name ILIKE only)
+           SERVER mode works here (spec says server). Reset page on
+           search/limit/date change (spec 5.7).
+  RAW      BorrowRequest { id, user_id, borrower_name, client_id?, ship_id?,
+             client_name, ship_name, status (overall, BE-computed: pending declined
+             returned return_pending on_loan partially_approved), created_at,
+             transactions: ToolTransaction[] | null }
+  MAP      borrower <- borrower_name ; requestDate <- created_at (DATETIME) ;
+           items <- (transactions ?? []).length ; status <- status (use BE
+           value, don't recompute getOverallStatus)
+  SELECT   selectable if any tx.status in (pending, return_pending)
+  BULK     per selected request, per tx:
+             pending        -> approve_borrow | decline_borrow
+             return_pending -> approve_return {status:"returned"} | {status:"return_rejected"}
+  ACTIONS  View Details -> T14 modal (admin mode)
+  GUARD    TOOLS/X
+
+[T13] My Borrowings  (/inventory/tools/my-borrowings)
+  STARTER  [NOT BUILT]
+  LIST     GET inventory/tools/my-borrowings   perm TOOLS/R   same params/shape as T12,
+           filtered by JWT user_id
+  QUIRK    "Search tools..." placeholder but BE search matches borrower_name only
+           -> filter tool names client-side on loaded page.
+  ACTIONS  T14 modal (user mode), Borrow button -> G1
+
+[T14] Borrow Request Items (modal; rows = request.transactions)
+  STARTER  [NOT BUILT]
+  OLD      tools/_components/BorrowRequestDetailsModal.tsx
+  ALL      POST inventory/tools/transactions/:tx_id/<action>
+           success { success:true, message } ; error 400 { success:false, message }
+           (e.g. "INSUFFICIENT_QTY" -> show friendly text)
+  ADMIN (perm TOOLS/X)
+    approve_borrow   no body   from pending|declined -> on_loan (deducts qty, sets borrow_date)
+    decline_borrow   no body   from pending|on_loan  -> declined (restores qty if on_loan)
+    approve_return   { status*: "returned"|"returned_broke"|"return_rejected" }
+                     from return_pending|return_rejected|returned|returned_broke
+      UI labels: Approve Return = "returned" ; Decline Return = "return_rejected" ;
+                 Broken/Missing = "returned_broke"
+  USER
+    cancel           POST …/:tx_id/cancel  perm TOOLS/R  pending only — HARD DELETES tx
+    return (single)  POST …/:tx_id/return  perm TOOLS/R  MULTIPART
+                     quantity_returned*(>0), condition, detail, responsible,
+                     files return_photos[] (required unless condition=broken)
+                     from on_loan|return_rejected|return_pending -> return_pending
+    return (bulk)    G2
+  STATUS LABEL  formatStatus: snake -> Title ; return_rejected shown "Declined"
+                (spec 5.5 — pick ONE label set in enums.ts TX_STATUS)
+
+[G1] Borrow Tools modal
+  STARTER  [NOT BUILT]
+  OLD      tools/_components/BorrowToolsModal.tsx
+  OPTIONS  tools   GET inventory/tools/simple  perm TOOLS/R -> { data:[{id,name,qty}] | null }
+                   disable qty<=0 "(Unavailable)"
+           client  GET client/dropdown-company  perm COMPANY/R -> { data:[{id,name}] }
+           ship    GET ship-data-management/ships?company_id=<id>&limit=100 (T17 list)
+  SUBMIT   POST inventory/tools/borrow-request   perm TOOLS/R   MULTIPART
+           borrower_name* (free text — default to current user fullName),
+           client_id?, client_name?, ship_id?, ship_name?,
+           items[0].tool_id, items[0].quantity, items[1]... (contiguous from 0, qty>0),
+           borrow_photos (>=1 file, required)
+           -> 201 { success, message } ; 400 insufficient qty ; every tx starts pending
+
+[G2] Return Tools modal
+  STARTER  [NOT BUILT]
+  OLD      tools/_components/ReturnToolsModal.tsx
+  ROWS     from selected tx: { tx_id, quantity_returned=quantity_borrowed,
+           condition:"good", detail:"", responsible:"" }
+  SUBMIT   POST inventory/tools/return-request   perm TOOLS/X (!)   MULTIPART
+           items[i].tx_id, items[i].quantity_returned, items[i].condition,
+           items[i].detail, items[i].responsible ; return_photos[] required if any
+           item condition != "broken"
+  QUIRK    normal users (My Borrowings) usually lack TOOLS/X -> 403. Fallback:
+           loop the single-tx endpoint POST …/:tx_id/return (TOOLS/R) per row.
+           BE ignores partial quantity (always full return) and condition
+           (broken only applied when admin sets returned_broke).
+
+--------------------------- SHIP DATA MANAGEMENT -------------------------------
+SDM = PAGES/ship-data-management
+
+[T15] Companies
+  STARTER  [BUILT components/tables/ship-data.tsx#CompaniesTable]
+  OLD      SDM/companies/page.tsx + _components/CompanyTable.tsx ;
+           hooks/useShipCompanies.ts ; services/shipCompanyService.ts
+  LIST     GET client/companies?page&limit[&group_id]   perm COMPANY/R   env(a)
+           default limit 10 -> fetchAll ; order created_at desc
+           invalid group_id silently ignored
+           search: GET client/companies/search?keyword&page&limit (name|pic|phone|
+                   address) — IGNORES group_id
+  RAW      { id, name, status, assets:int (ship count), pic, phone, address,
+             created_at, updated_at }   (no group info)
+  MAP      companyName <- name ; pic/phone (""->"-") ; assets ; status lowercased
+  PAGE     old page had a "Pilih Group" select (GET client/dropdown-groups) and
+           listed companies only for chosen group. Starter shows all — keep all
+           by default, optional group select -> refetch with group_id.
+  DETAIL   GET client/companies/:id -> { success, data:<same> } (old = modal, no page)
+  CREATE   POST client/companies   perm COMPANY/W   JSON
+           { name*, status*, group_id? (uuid or OMIT — "" -> 400), pic, phone, address }
+           409 duplicate name ; 404 group not found
+  UPDATE   PATCH client/companies/:id  { name?, status?, pic?, phone?, address? }
+           QUIRK group_id NOT updatable
+  DELETE   DELETE client/companies/:id  perm COMPANY/D
+  FORM     add address (+ group select on create).
+  DROPDOWN GET client/dropdown-company -> { data:[{id,name}] } name asc
+
+[T16] Groups
+  STARTER  [BUILT ship-data.tsx#GroupsTable]
+  OLD      SDM/groups/page.tsx ; hooks/useGroups.ts ; services/groupService.ts
+  LIST     GET client/groups?page&limit   perm GROUP/R  env(a) ; default 10 -> fetchAll
+           search: GET client/groups/search?keyword (name|alias|city)
+  RAW      { id, name, alias, telp, city, company_count:int, created_at, updated_at }
+  MAP      1:1 (snake_case already matches starter row) ; + telp available
+  DETAIL   GET client/groups/:id -> { success, data } ; group companies =
+           GET client/companies?group_id=<id> (T15 list)
+  CREATE   POST client/groups  perm GROUP/W  { name*, alias?, telp?, city? }  409 dup
+  UPDATE   PATCH client/groups/:id  same optional
+  DELETE   DELETE client/groups/:id  perm GROUP/D
+  FORM     add telp.
+  DROPDOWN GET client/dropdown-groups -> { data:[{id,name}] }
+
+[T17] Ships (data-kapal)
+  STARTER  [BUILT ship-data.tsx#ShipsTable]
+  OLD      SDM/data-kapal/page.tsx ; _components/ShipDataTable.tsx, AddShipModal.tsx,
+           EditShipModal.tsx ; hooks/useShipManagement*.ts ; services/shipService.ts
+  LIST     GET ship-data-management/ships?page&limit[&company_id]
+           perm SHIP_MANAGEMENT/R  env(a) ; default 10 -> fetchAll ; created_at desc
+           invalid company_id -> 400
+           search: GET ship-data-management/ships/search?keyword&company_id
+                   (ships.name|companies.name|type|status — NOT alias)
+  RAW      { id, name, type, status, alias, ship_type, total_device:int }
+  MAP      alias <- alias ; shipType <- ship_type ; type <- type lowercased (fms|ems) ;
+           status lowercased ; totalDevice <- total_device ; (+ name)
+           companyName  GAP in list. Options:
+             (a) page-level Company select (old behaviour: load
+                 client/dropdown-company, auto-pick first, fetch with
+                 company_id, fill companyName from selected option) — recommended
+             (b) "all companies": fetch dropdown-company, then one list call
+                 per company and tag rows with company name.
+  DETAIL   GET ship-data-management/ships/:id -> { success, data: ShipResponse }
+           { id, name, type, status, flag_code, company_id?, company_name, alias, pic,
+             installation_date? (RFC3339), satellite_id, satellite_operator,
+             telco_operator, created_by, updated_by, imo_number, call_sign, dimension,
+             mmsi_number, ship_type, antenna_position, gsm_number, imei_number,
+             satellite_device_id, notes, updated_at, devices?[], items?[] }
+           + GET ships/:id/folders (documentation folders of ship)
+  CREATE   POST ship-data-management/ships  perm SHIP_MANAGEMENT/W  JSON
+           { name*, company_id* (uuid), alias*, type, status, flag_code (2 chars,
+             uppercased), pic, installation_date ("YYYY-MM-DD" or OMIT — "" -> 500),
+             satellite_id, satellite_operator, telco_operator, imo_number, call_sign,
+             dimension, mmsi_number, ship_type, antenna_position, gsm_number,
+             imei_number, satellite_device_id, notes }   409 dup name
+  UPDATE   PATCH ship-data-management/ships/:id  same keys optional ; writes edit history
+  DELETE   DELETE ship-data-management/ships/:id  perm SHIP_MANAGEMENT/D
+  FORM     needs company select + name + the many optional fields -> custom dialog.
+  DROPDOWN GET ship-data-management/dropdown-ship?company_id=<uuid required>
+           -> { data:[{id,name,alias}] }  QUIRK alias always "" (repo selects id,name)
+
+[T18] Ship Devices  (ship detail page)
+  STARTER  [NOT BUILT]
+  LIST     GET ship-data-management/ships/:id/devices  perm SHIP_MANAGEMENT/R  env(a)
+           no params, no paging, no order
+  RAW      { id, ship_id, device_name, unique_id, device_status }
+  MAP      1:1 ; device_status lowercased
+  CREATE   POST ship-data-management/ships/:id/devices  W
+           { device_name*, unique_id, device_status* }
+           QUIRK unique_id unique + NOT NULL: empty/dup -> 500. Require it in form.
+  UPDATE   PATCH ship-data-management/ship-devices/:deviceId  (optional same keys)
+  DELETE   DELETE ship-data-management/ship-devices/:deviceId  D
+  DETAIL   GET ship-data-management/ship-devices/:id
+
+[T19] Ship Items  (ship detail page)
+  STARTER  [NOT BUILT]
+  LIST     GET ship-data-management/ships/:id/items  R  env(a) ; order created_at asc
+  RAW      { id, ship_id, item_name, unique_id, status, created_by, updated_by,
+             created_at, updated_at }   (no description in list)
+  MAP      1:1 ; status lowercased
+  CREATE   POST ship-data-management/ships/:id/items  W
+           { item_name*, unique_id (required in practice, unique), status,
+             description: { key: value } (free map) }
+  UPDATE   PATCH ship-data-management/ship-items/:id  (description replaces whole map)
+  DELETE   DELETE ship-data-management/ship-items/:id  D
+  DETAIL   GET ship-data-management/ship-items/:id -> + description:object|null
+           (page data-kapal/[id]/items/[itemId])
+
+[T20] Ship Borrowed Tools  (ship detail page)
+  STARTER  [NOT BUILT]
+  LIST     GET ship-data-management/ships/:id/borrowed-tools  perm SHIP_MANAGEMENT/R
+           env(a) ; txs with status on_loan whose request.ship_id = :id
+  RAW      ToolTransaction (see T11)
+  MAP      { id, tool_name, borrower_name, quantity_borrowed, borrowed_at } ; read-only
+
+[T21] Ship Installation Records  = T07 columns
+  STARTER  [NOT BUILT]
+  LIST     GET ship-data-management/installations?ship_id=<uuid>&sort_order=desc
+           (+ fetchAll) — see T23 shape. ship_id must be uuid.
+  NOTE     old search read raw keys on mapped rows (broken) — search shipName /
+           startDate on mapped row.
+
+[T22] Ship Maintenance Records  = T08 columns
+  STARTER  [NOT BUILT]
+  LIST     GET ship-data-management/maintenances?ship_id=<uuid>&sort_order=desc
+           (no maintenance_type -> both channels) — see T25 shape
+  MAP      channel badge <- maintenance_type ; link /maintenance/{channel}/{maintenance_id}
+
+[T23] Installations (data-pemasangan)
+  STARTER  [BUILT ship-data.tsx#InstallationsTable]
+  OLD      SDM/installation-data/page.tsx ; _components/InstallationTable.tsx,
+           AddInstallationModal.tsx ; services/installationService.ts (transform 11-57)
+  LIST     GET ship-data-management/installations?page&limit&sort_order[&ship_id]
+           perm INSTALLATION/R  env(b) ; default limit 10 -> fetchAll
+           no search/status/type params -> client-side
+  RAW      { id (uuid), installation_id ("INST-XXXXXXXX"), kapal, company_id,
+             company_name, tipe, start_date? ("YYYY-MM-DD"), finish_date? (key ABSENT
+             when null), lokasi, teknisi: string[] (names), devices (comma text),
+             status (scheduled|finish|in_progress|canceled), conclusion?, survey_id?,
+             survey_number?, created_at (RFC3339) }   no ship_id in list
+  MAP      id <- id ; installationId <- installation_id || id ; shipName <- kapal ;
+           companyName <- company_name ; type <- tipe ; startDate <- start_date ?? "" ;
+           finishDate <- finish_date ?? "" ; location <- lokasi ;
+           technicians <- teknisi ?? [] ; equipment <- devices ;
+           status <- map (1.8) ; createdAt <- created_at
+  DETAIL   GET ship-data-management/installations/:installation_id  (uuid OR INST-…)
+           bare: list item + ship_id, notes, updated_at,
+           documentations:[{id(uuid), doc_id, title}]   404 {error}
+  CREATE   POST ship-data-management/installations  perm INSTALLATION/W  JSON
+           { company_id*, ship_id*, tipe* ("FMS"|"EMS"), start_date? ("YYYY-MM-DD"),
+             finish_date?, lokasi, teknisi: string[] (NAMES; unknown names auto-
+             create technicians), devices (text), survey_id? (uuid),
+             status* (scheduled|finish|in_progress|canceled), notes, conclusion }
+           -> 201 bare detail ; 400 {error}
+  UPDATE   PATCH ship-data-management/installations/:installation_id  all optional
+           (teknisi replaces list) ; writes edit history ; quick status
+           change = PATCH { status }
+  DELETE   DELETE ship-data-management/installations/:installation_id  perm INSTALLATION/D
+  DOCS     link existing documentation: POST …/installations/:id/documents
+           { doc_id* = documentation UUID (not DOC-…) }  W
+           unlink: DELETE …/installations/:id/documents/:doc_uuid  D
+  FORM     company select -> ship select (dropdown-ship?company_id) ; technician tag
+           input ; devices free text (GET inventory/dropdown-device for hints) ;
+           survey select = GET surveys?ship_id=<ship>&limit=100 (T30)
+  STATS    page cards computed client-side from rows (old did same).
+           GET ship-data-management/installations/summary -> bare
+           { total, selesai (finish), dijadwalkan (scheduled) } (unused by old)
+
+[T24] Connectivity GSM / VPN
+  STARTER  [BUILT components/tables/operations.tsx#ConnectivityTable]
+  BACKEND  NONE. Old FE = hardcoded mock. KEEP MOCK. See Section 4.
+
+[T25] Maintenance remote / dispatch
+  STARTER  [BUILT operations.tsx#MaintenanceTable (type prop)]
+  OLD      SDM/maintenance/{remote,dispatch}/page.tsx ; _components/MaintenanceTable.tsx,
+           AddMaintenanceModal.tsx, EditMaintenanceModal.tsx, SeveritySection.tsx,
+           MaintenanceCommentsSection.tsx ; services/maintenanceService.ts
+  LIST     GET ship-data-management/maintenances?page&limit&maintenance_type=<remote|
+           dispatch>&sort_order[&ship_id]   perm MAINTENANCE/R  env(b)
+           default limit 10 -> fetchAll ; no search/status/tipe params
+  RAW      { id (uuid), maintenance_id ("MTN-XXXXXXXX"), company_id, company_name,
+             ship_id, kapal, problem, tipe (CORRECTIVE|PREVENTIVE), teknisi: string[],
+             mulai? ("YYYY-MM-DD"), selesai?, status, maintenance_type (remote|dispatch),
+             details?, notes?, conclusion?, severity?, severity_details?, created_at }
+  MAP      id <- maintenance_id   (!! all :maintenance_id routes accept ONLY the
+                                   MTN short id, NOT the uuid)
+           shipName <- kapal ; problemDescription <- problem ; type <- tipe ;
+           technicians <- teknisi ?? [] ; startDate <- mulai ?? "" ;
+           endDate <- selesai ?? "" ; createdAt <- created_at ; status <- status ;
+           (+ keep channel <- maintenance_type, uuid, severity, companyName)
+  STATUS   remote filter: in_queue in_progress completed canceled
+           dispatch filter: in_progress scheduled completed canceled  (starter matches)
+  DETAIL   GET ship-data-management/maintenances/:maintenance_id  (MTN id) bare:
+           list keys but teknisi = [{ teknisi_id, name, initials }],
+           + problem_ref, documentations:[{id,doc_id,title}], updated_at
+  CREATE   POST ship-data-management/maintenances  perm MAINTENANCE/W  JSON
+           { company_id*, ship_id*, tipe*, problem, maintenance_type (= page type;
+             default dispatch), teknisi*: string[] names (empty -> error),
+             mulai?, selesai?, problem_ref?, details, notes, conclusion }
+           NO status (BE sets in_queue for remote, scheduled for dispatch)
+           NO severity on create (set via PATCH after)
+  UPDATE   PATCH ship-data-management/maintenances/:maintenance_id  all optional:
+           company_id, ship_id, problem, tipe, teknisi[], mulai, selesai, problem_ref,
+           details, status, maintenance_type, notes, conclusion, severity,
+           severity_details ; writes edit history
+  DELETE   DELETE ship-data-management/maintenances/:maintenance_id  perm MAINTENANCE/D
+  FORWARD  (remote only, status not forwarded/completed, perm MAINTENANCE/W,
+           confirm "Teruskan Laporan ke Dispatch?")
+           -> PATCH …/maintenances/:maintenance_id { maintenance_type: "dispatch" }
+              BE converts IN PLACE: channel dispatch, status scheduled.
+              Do NOT send status in the same PATCH (would override scheduled).
+           Do NOT copy old FE (create copy + PATCH status forwarded — created bogus
+           technicians from teknisi_id). Row then leaves the remote list.
+           QUIRK DELETE on a forwarded dispatch row does NOT delete: BE reverts it
+           to remote / in_queue (un-forward). Real delete only on non-forwarded rows.
+           Refetch after delete. The forwarded flag is not in any DTO, so the FE
+           can't tell which dispatch rows will revert -> keep confirm text neutral.
+  DOCS     POST …/maintenances/:id/documents { doc_id* (documentation uuid) } ;
+           DELETE …/maintenances/:id/documents/:doc_uuid
+  COMMENTS (detail page) JWT only, no RBAC:
+           GET  …/maintenances/:maintenance_id/comments -> bare
+                [{ id, maintenance_id (uuid), user_id, user_name, comment, created_at,
+                   updated_at }] asc
+           POST …/maintenances/:maintenance_id/comments { comment* } -> 201 bare
+           PATCH  …/maintenance-comments/:comment_id { comment* }  (owner or admin)
+           DELETE …/maintenance-comments/:comment_id                (owner or admin)
+  FORM     company -> ship selects, technician tag input, dates, tipe.
+
+[T26] Problems / Alerts
+  STARTER  [BUILT ship-data.tsx#ProblemsTable]
+  OLD      SDM/problem/page.tsx ; hooks/useShipAlerts.ts (60s polling) ;
+           components/AlertDetailModal.tsx
+  LIST     GET ship-data-management/alerts  perm PROBLEM/R  env(c) bare array
+           BE in-memory cache of "firing" alerts from an external alert service
+           (polled every 60s). No params, no paging.
+  RAW      { id:int, alertKey, clientId, level, message, source, status,
+             firstFiredAt, lastFiredAt, resolvedAt?, resolveTimeoutMinutes:int,
+             payload:object, createdAt, updatedAt }   (camelCase!)
+  MAP      id <- String(id) ; clientId, alertKey, level 1:1 ; keep message/firstFiredAt
+           for detail. "Kapal" = raw clientId (no ship join available).
+  POLL     refetch every 60s.
+  DETAIL   no endpoint — show the row (message, payload, times) in a modal.
+           Starter detailHref /ship-data/problem/{id}: render from cached list or
+           switch to modal. Old problem/[id] page was mock.
+  ACTIONS  read-only.
+
+[SUMMARY] Ship data summary page  (starter app/ship-data/summary, components/ship-data/data.ts)
+  STARTER  [BUILT, mock: summaryStats, problemActivity]
+  SOURCE   compose client-side (no summary endpoint except installations/summary):
+           ships         fetchAll ship-data-management/ships
+           alerts        GET ship-data-management/alerts
+           installations fetchAll ship-data-management/installations
+           maintenances  fetchAll ship-data-management/maintenances
+  CARDS    Total Kapal = ships.length ; Kapal Online/active = ships status active ;
+           Problem Terbuka = alerts.length ; Active maintenance = status in_progress.
+           "Konektivitas %" + delta/bars sparkline: no source -> keep mock or hide.
+  HEATMAP  problemActivity: per-day count from installations.start_date +
+           maintenances.mulai (old FE ActivityMatrix) — alerts have no history.
+
+[HISTORY] Edit history (ship / installation / maintenance / project / survey detail)
+  GET ship-data-management/edit-histories/:entity_type/:entity_id   JWT only
+  entity_type ship|installation|maintenance|project|survey ;
+  entity_id = uuid, except maintenance = MTN short id
+  -> bare [{ id, entity_type, entity_id, user_name, changes (text), created_at }] desc
+
+---------------------------------- FINANCE -------------------------------------
+
+[T27] Income / Outcome      STARTER [NOT BUILT]   BACKEND NONE -> mock (Section 4)
+[T28] Purchase Orders       STARTER [NOT BUILT]   BACKEND NONE -> mock (Section 4)
+
+---------------------------------- PROJECTS ------------------------------------
+
+[T29] Project Overview
+  STARTER  [NOT BUILT]
+  OLD      PAGES/projects/overview/page.tsx ; _components/ProjectTable.tsx,
+           ProjectFormModal.tsx ; hooks/useProjects.ts ; services/projectService.ts
+  LIST     GET projects?page&limit&sort=<asc|desc>   perm PROJECTS/R   env(b)
+           sort on created_at. QUIRK param is `sort` (old FE sent sort_order ->
+           ignored). No search/status params ; limit<1 -> 10 ; fetchAll.
+  RAW      { id (uuid), project_id ("PRJ-XXXXXXXX"), company_id?, company_name,
+             ship_id?, ship_name, status (free), progress:int, issue, next_action,
+             pic, target_date? ("YYYY-MM-DD"), last_update_detail, created_at,
+             updated_at }
+  MAP      projectId <- project_id ; shipName <- ship_name ; companyName <- company_name ;
+           status ; progress ?? 0 ; issue ; pic ; targetDate <- target_date ?? "" ;
+           updatedAt <- updated_at  ("Last Update" sort = client-side on updated_at)
+  DETAIL   GET projects/:id  (uuid or PRJ-…) bare ; 404 {error:"project not found"}
+  CREATE   POST projects  perm PROJECTS/W  JSON
+           { company_name*, ship_name*, status*, company_id?, ship_id?, progress?:int,
+             issue?, next_action?, pic?, target_date? ("YYYY-MM-DD"),
+             last_update_detail? }  -> 201 bare
+           company/ship are "creatable" combos: pick existing (send id + name) or
+           type new name (send name only).
+  UPDATE   PATCH projects/:id  all optional ; "" clears company_id/ship_id/target_date
+  DELETE   DELETE projects/:id  perm PROJECTS/D (hard)
+  STATUS   options "Not Started" | "On Progress" | "Done" | "Canceled" (add PROJECT_STATUS
+           to enums.ts with these keys)
+
+[T30] Survey
+  STARTER  [NOT BUILT]
+  = T29 with: path surveys ; survey_id ("SRV-…") instead of project_id ; NO progress ;
+    list also accepts ship_id ; detail -> /projects/survey/{id} ;
+    empty "Belum ada data survey" ; same perm PROJECTS.
+
+------------------------------- NOTIFICATIONS ----------------------------------
+
+[T31] Notifications         STARTER [NOT BUILT]   BACKEND NONE -> mock (Section 4)
+
+------------------------------- DOCUMENTATION ----------------------------------
+NOTE  documentation, folders, templates, submissions routes are mounted at
+      /api/documentation, /api/folders, /api/templates, /api/submissions
+      (same /be-api prefix). Old FE had NO permission gating in /documentation.
+
+[T32] Documents  (main list + folder page)
+  STARTER  [BUILT components/tables/documentation.tsx#DocumentsTable]
+  OLD      PAGES/documentation/page.tsx ; documentation/folder/[id]/page.tsx ;
+           services/documentService.ts ; hooks/useDocuments.ts, useFolders.ts ;
+           _components/DocumentFormModal.tsx
+  LIST     GET documentation?page&limit&search&sort_title&sort_date
+           perm DOCUMENTATION/R   env(a)   meta.total_pages = 0 (compute)
+           limit 1..100 (else reset to 10) ; default order created_at desc
+           search ILIKE doc_id|title|description|client|ship_name
+           access filter: public OR mine OR explicit can_read
+           QUIRK no folder_id filter: main list also shows docs inside folders.
+           Phase 1 fetchAll + client; spec wants server mode here (phase 2).
+  RAW      { id (uuid), doc_id, doc_type, folder_id?, title, status (PENDING|
+             ONGOING|FINISHED), division, client, client_id?, ship_name, ship_id?,
+             source_item, reimbursement ("yes"|"no"), due_date? (RFC3339),
+             required_docs: string[], date, created_by_id, created_by_name,
+             created_at, deleted_at?, user_can_edit:bool, user_can_delete:bool }
+  MAP      1:1 with starter Document row (keys already match) ; due_date ?? "" ;
+           required_docs ?? []
+  CAN      edit if row.user_can_edit ; delete if row.user_can_delete
+           (starter `can` already wired) AND page perm DOCUMENTATION/W|D.
+  FOLDER   GET folders/:id -> { success, data:{ folder:FolderResponse,
+             breadcrumbs:[]|null, sub_folders:[]|null, documents:[DocItem]|null } }
+           root: GET folders -> { success, data:[FolderResponse] }
+           FolderResponse { id, name, parent_id?, client_id?, client_name?, ship_id?,
+             ship_name?, created_by_id, created_by_name, is_public, created_at,
+             updated_at, permissions[], user_can_edit, user_can_delete }
+           folder create/update/delete: POST folders / PUT folders/:id /
+           DELETE folders/:id (DOCUMENTATION/X)
+           folder page = client search/sort (don't mutate props array — spec 5.3)
+  DETAIL   GET documentation/:id -> { success, data: list item + user_id,
+             user_email, description, item_list:[{name,qty,unit_price,total}],
+             signings:[{name,signed}], total_cost:number, is_public, updated_at,
+             attachments:[{id, document_id, file_name, file_url, file_size,
+             mime_type, created_at}], permissions:[{id,user_id,user_name?,can_read,
+             can_edit,can_delete}], linked_docs:[{id,doc_id,title,status}] }
+  CREATE   POST documentation  perm DOCUMENTATION/W  MULTIPART -> see G3 for fields
+  UPDATE   PUT documentation/:id  (PUT, not PATCH)  MULTIPART ; + creator/can_edit
+           check -> 403 { success:false, message }
+  DELETE   DELETE documentation/:id  perm DOCUMENTATION/D (soft, 30-day trash)
+  OTHER    DELETE documentation/:id/attachments/:attachmentId
+           POST documentation/:id/links { linked_document_id } ;
+           DELETE documentation/:id/links/:linkedDocId
+           download (public): /be-api/documentation/attachments/:attachmentId/download
+           quick search: GET documentation/search?q= (top 20)
+  FORM     starter `fields` too small — needs custom dialog (G3).
+
+[T33] Deleted Documents
+  STARTER  [NOT BUILT]
+  LIST     GET documentation/deleted?page&limit   perm DOCUMENTATION/R  env(a)
+           order deleted_at desc ; no search/sort ; same item shape (deleted_at set)
+  MAP      Time Left = deleted_at + 30d - now: <0 "Pending permanent deletion",
+           0 "Less than a day", else "N days"
+  RESTORE  POST documentation/:id/restore  perm DOCUMENTATION/W  (confirm)
+           QUIRK no ownership/existence check (always success)
+  PURGE    BE deletes >30 days automatically (daily job).
+
+[T34] Available Templates  (/documentation/generate)
+  STARTER  [BUILT documentation.tsx#AvailableTemplatesTable] (starter generate page
+           itself is a local pandoc tool, separate)
+  LIST     GET templates?page&limit   perm TEMPLATE_BUILDER/R   env(a) data may be null
+           ALWAYS send limit (limit=0 crashes) ; order created_at desc
+  RAW      { id, name, owner_id, owner_name, status ("draft"|"published"),
+             draft_schema:object, current_version:int (0 until published),
+             created_at, updated_at }
+  MAP      id, name, status, current_version 1:1
+  ACTION   Use Template enabled only status=published ->
+           /documentation/generate/new?templateId={id}
+  QUIRK    generate flow broken in BE contract: submit needs a template VERSION id
+           (POST submissions/version/:versionId/submit) but no route returns
+           version ids (GET templates/:id has none; publish response does:
+           { id (version id), template_id, version, schema, published_at }).
+           -> Keep generate flow out of scope / mock until BE adds version lookup.
+  SUBMISSIONS (reference) perm GENERATE_DOCUMENT:
+           GET submissions/template/:templateId?page&limit ; GET submissions/:id ;
+           POST submissions/version/:versionId/submit { data* } ;
+           POST submissions/:id/generate -> { id, submission_id, docx_path, pdf_path }
+
+[T35] All Templates  (/documentation/template-builder)
+  STARTER  [BUILT documentation.tsx#TemplatesTable]
+  LIST     same as T34 ; columns name, created_at (DATE_SHORT)
+  CREATE   POST templates { name* }  perm TEMPLATE_BUILDER/W  -> 201 { success, data }
+  UPDATE   PATCH templates/:id/draft { name?, draft_schema?: { blocks:[…] } }  W
+  PUBLISH  POST templates/:id/publish  W  -> new version ; 409 if draft empty
+           (old UI never called publish -> nothing ever "published". Expose a
+            Publish row action.)
+  DELETE   DELETE templates/:id  perm TEMPLATE_BUILDER/D (soft)
+  DETAIL   GET templates/:id -> { success, data }
+  EDIT     -> /documentation/template-builder/{id}/edit
+
+[T36] Document Item List (read-only, document detail)
+  STARTER  [NOT BUILT]
+  SOURCE   GET documentation/:id -> data.item_list (array; may arrive as JSON
+           string in old rows -> JSON.parse fallback) ; footer = data.total_cost
+           (BE does NOT recompute; client-sent)
+  ROW      { name, qty, unit_price, total } ; numbers 2dp
+
+[G3] Document Item List form  (inside document create/edit)
+  STARTER  [NOT BUILT]
+  ROW      { name, qty (min 1), unit_price (min 0), total = round2(qty*unit_price) }
+           remove disabled when 1 row ; footer Total Cost = sum(total)
+           drop unnamed rows from item_list AND from total_cost (old FE bug: counted)
+  SUBMIT   MULTIPART for POST documentation / PUT documentation/:id:
+           doc_id* (create: `${type}-${DDMMYY}-${8 random}`), doc_type*, title*,
+           user_email, division, date (YYYY-MM-DD), description, client, client_id?,
+           ship_name, ship_id?, source_item, reimbursement ("yes"|"no"), due_date?,
+           status, total_cost, is_public ("true"|"false"),
+           item_list      JSON string of rows
+           signings       JSON string [{name, signed}]
+           required_docs  JSON string string[]
+           permissions    JSON string [{user_id|null, can_read, can_edit, can_delete}]
+           files          repeated file field
+           folder_id      create only
+           permissions / linked_doc_ids present = replace ; files appended
+  OPTIONS  doc_type CA FSR BA FINANCE DRAFT ; users for permissions =
+           GET user-management/dropdown-user (perm USERS/R) ; client =
+           client/dropdown-company ; ship = dropdown-ship?company_id
+
+---------------------------------- CRM / DEV -----------------------------------
+
+[T37] CRM Recent Leads      STARTER [NOT BUILT]   BACKEND NONE -> mock (Section 4)
+
+[T38] Iteration Analysis Findings
+  STARTER  [BUILT components/tables/dev-tools.tsx#IterationAnalysisTable]
+  BACKEND  TELEMETRY service (NOT ramus-be-erp; repo not in workspace, unverified)
+           base NEXT_PUBLIC_TELEMETRY_URL ; Bearer = same ERP access token ;
+           timeout 300s ; add a second rewrite /tel-api/:path* -> telemetry origin
+  LIST     GET api/v1/devtools/analysis/iteration?window=<morning|evening|now>&date
+           [&compId&assetId]
+  RAW      { status, window:{key,label,date,start,end}, scannedAt, thresholds,
+             vessels: VesselResult[], message? }
+           VesselResult { assetId, name, compId, deviceCount, sampleCount,
+             suspects:{FLOWMETER,PLC,GPS:number}, checks:{flowMeterWhileEngineOff,
+             fuelOverBaseline, rpmJumper, gps: bool}, findings:[{rule, suspect, why,
+             position, minutes, ratio?, evidence, samples}] }
+  MAP      id <- assetId ; name ; suspects ; sampleCount ;
+           QUIRK starter checks keyed FLOWMETER/PLC/GPS but real checks keys are
+           flowMeterWhileEngineOff/fuelOverBaseline/rpmJumper/gps -> Coverage cell
+           must list false keys of real `checks`.
+  UI       needs window + date inputs and a Run button (fetch on demand, not mount).
+  GUARD    old FE: role name === "admin". Use DEV_TOOLS key if present in access
+           map, else role check.
+
+[T39] Replace DB CSV Preview
+  STARTER  [BUILT dev-tools.tsx#ReplaceDbTable]
+  BACKEND  TELEMETRY service (same as T38)
+           GET  api/v1/devtools/csv/catalog[?refresh=true]
+           GET  api/v1/devtools/csv/export   (blob; headers x-row-count, x-truncated)
+           POST api/v1/devtools/csv/preview?compId&assetId[&dataset]
+                body = raw CSV text (Content-Type text/csv) or .xlsx ArrayBuffer
+           POST api/v1/devtools/csv/import  (same body, + allowPartial)
+  RAW      preview -> { status, ok, asset, detected:{format,datasets,columns},
+             delimiter, dateOrder, summary: DatasetSummary[], totals:{rows,
+             willReplace, willInsert}, errors:[{line,message}], errorCount, warnings }
+           DatasetSummary { dataset, table, rows, willReplace, willInsert,
+             devices: string[], range:{start,end}, sample }
+  MAP      id <- table (or dataset) ; rest 1:1 with starter row
+  UI       rows come from a preview POST after file upload — not a list fetch.
+
+
+================================================================================
+4. TABLES WITHOUT BACKEND — keep mock, proposed contract for a later BE task
+================================================================================
+Keep starter mock rows (useResource mock path). Do not fake persistence.
+When BE is built, follow existing conventions: env(a) {success,data,meta},
+page/limit, PATCH updates, RequirePermission.
+
+[T24] Connectivity GSM / VPN   (no model/table anywhere; closest real data =
+      ship detail gsm_number, imei_number, telco_operator, satellite_*)
+  proposed  GET/POST connectivity/{gsm|vpn} ; PATCH/DELETE connectivity/{gsm|vpn}/:id
+            item { id, name, ip, status (active|inactive), created_at, updated_at }
+            perm new key CONNECTIVITY (or SHIP_MANAGEMENT)
+[T27] Income / Outcome
+  proposed  GET/POST finance/transactions ; GET/PATCH/DELETE finance/transactions/:id
+            item { id, date (YYYY-MM-DD), description, category, account, ref,
+                   type (INCOME|OUTCOME), amount (number, IDR) }   perm FINANCE (seeded)
+[T28] Purchase Orders
+  proposed  GET/POST finance/purchase-orders ; GET/PATCH/DELETE finance/purchase-orders/:id
+            item { id ("PO-YYYY-NNN"), item, vendor, qty, price, category
+                   (EQUIPMENT|INFRASTRUCTURE|OTHERS), date, status (APPROVED|PENDING|
+                   REJECTED) }   perm FINANCE
+[T31] Notifications
+  proposed  GET/POST notifications ; GET/PATCH/DELETE notifications/:id
+            item { id, title, description, category (MAINTENANCE|FINANCE|SYSTEM),
+                   target (managers|engineers|developers|all), scheduled_at (RFC3339) }
+            perm new key NOTIFICATION
+[T37] CRM leads
+  proposed  GET crm/leads  item { id, name, company, status, source, last_activity_at }
+[T26 detail] Problem detail page — mock in old FE ; BE has Problem model/DTOs
+      (problem_id, kapal, kategori, tanggal, assigned_to, severity, status,
+       summary {total, open, critical, resolved}) but NO routes registered.
+
+
+================================================================================
+5. KNOWN BACKEND QUIRKS / BUGS (work around in FE; list for a BE task)
+================================================================================
+ 5.1  CORS lacks :3001 -> use /be-api rewrite (1.1).
+ 5.2  Three response envelopes + two error keys (error | message) (1.4).
+ 5.3  total_pages = 0 on users, divisions, devices, companies, groups, ships,
+      documentation. data:null instead of [] on tools, tx, templates, folders.
+ 5.4  Default limits silently cap lists (10/20) -> fetchAll.
+ 5.5  sort_order (installations, maintenances) and sort (projects, surveys) are
+      concatenated raw into ORDER BY -> SQL injection. FE: only send "asc"|"desc".
+ 5.6  projects/surveys read `sort`, not `sort_order`; sort is on created_at.
+ 5.7  Ship list has no company_name/company_id; dropdown-ship alias always "".
+ 5.8  Company create with group_id:"" -> 400; group_id not updatable.
+ 5.9  Device create rejects price/qty = 0 (gin required on int).
+ 5.10 Ship device/item unique_id empty or duplicate -> 500.
+ 5.11 Ship create installation_date:"" -> 500. Omit when empty.
+ 5.12 Maintenance routes take MTN short id only; installation routes take uuid or
+      INST id. Edit history for maintenance keyed by MTN id.
+ 5.13 Maintenance create ignores status + severity. Forward = PATCH
+      {maintenance_type:"dispatch"} (in place).
+ 5.14 Installation status validated (scheduled|finish|in_progress|canceled);
+      maintenance status free text; "Finish" label means finish vs completed.
+ 5.15 Tool cancel hard-deletes the transaction (no "cancelled" status).
+ 5.16 return-request needs TOOLS/X while borrow needs TOOLS/R; partial quantity
+      and condition ignored.
+ 5.17 Users: no last-login data; user detail has no division_id (use division.id).
+ 5.18 Division search param is keyword (old FE sent q).
+ 5.19 Permissions CRUD guarded by ROLE_MANAGEMENT, not PERMISSION.
+ 5.20 Seed (pkg/db/seed.go) missing PAGE keys DOCUMENTATION, TEMPLATE_BUILDER,
+      GENERATE_DOCUMENT, TOOLS, PROJECTS -> fresh DB roles can't reach them
+      until permissions are added via T04.
+ 5.21 Templates: limit=0 crash; no route returns version id -> generate flow
+      unusable; publish never called by old UI.
+ 5.22 Documentation main list ignores folders; restore unchecked; total_cost not
+      recomputed.
+ 5.23 Login of inactive user -> 500 not 401. Refresh rotates token.
+ 5.24 Comments + edit-histories routes have no RBAC (JWT only).
+ 5.25 Project edit history user always "System" (handler reads userName,
+      middleware sets username).
+ 5.26 Alerts come from a hard-coded external IP poller in alert_service.go.
+ 5.27 DELETE on a forwarded dispatch maintenance reverts it to remote/in_queue
+      instead of deleting (maintenance_service.go DeleteMaintenance).
+
+
+================================================================================
+6. IMPLEMENTATION ORDER (for the agent)
+================================================================================
+ 1. next.config.js rewrites (/be-api, /tel-api) + env ; lib/http.ts (request,
+    unwrap, errorText, fetchAll, multipart) .
+ 2. Auth: lib/auth.ts, AuthProvider, app/login/page.tsx, proxy.ts guard, refresh
+    rotation, can(); sidebar (lib/constant.ts navigationData) hides items by
+    PAGE key (add `perm` to NavSubPage).
+ 3. Adapter seam: useResource(adapter, mock) + ResourceTable(adapter) + `can`
+    from adapter.perm ; keep mock fallback.
+ 4. Simple CRUD, json, 1:1-ish: T02 Divisions, T16 Groups, T15 Companies,
+    T09 Devices, T01 Users, Roles (+T05 picker), T04 Permissions.
+ 5. Ship data: T17 Ships (company select), ship detail T18 T19 T20 T21 T22,
+    T23 Installations, T25 Maintenance (+forward, comments), T26 Alerts (poll),
+    SUMMARY.
+ 6. Tools flow: T10 Tools (multipart), T11, T12, T13, T14, G1, G2.
+ 7. Documentation: T32 (+folders), T33, T35, T34, T36, G3.
+ 8. Projects: T29, T30.
+ 9. Dev tools: T38, T39 (telemetry).
+10. Leave mock: T24, T27, T28, T31, T37.
+After each step: run `bun run check-types` + `bun run lint` in apps/dashboard;
+with BE running (localhost:8080) log in and open each wired page; check list
+count == meta.total, add/edit/delete round-trip, 403 path with a VIEWER user.
+================================================================================
+END
+================================================================================

@@ -4,6 +4,10 @@ import { Geist } from "next/font/google";
 import { SidebarProviders } from "@repo/ui/sidebar/providers";
 import { cn } from "@/lib/utils";
 import { SidebarLayout } from "@/components/sidebar-layout";
+import { ThemeProvider } from "@/components/theme-provider";
+import { AgentBridge } from "@/components/agent-bridge";
+import { AuthProvider } from "@/lib/auth";
+import { TRPCReactProvider } from "@/lib/trpc/client";
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
@@ -18,11 +22,23 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="id" className={cn("font-sans", geist.variable)}>
+    <html
+      lang="id"
+      className={cn("font-sans", geist.variable)}
+      suppressHydrationWarning
+    >
       <body>
-        <SidebarProviders>
-          <SidebarLayout>{children}</SidebarLayout>
-        </SidebarProviders>
+        <ThemeProvider>
+          <TRPCReactProvider>
+            <AuthProvider>
+              <SidebarProviders>
+                <SidebarLayout>
+                  <AgentBridge>{children}</AgentBridge>
+                </SidebarLayout>
+              </SidebarProviders>
+            </AuthProvider>
+          </TRPCReactProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

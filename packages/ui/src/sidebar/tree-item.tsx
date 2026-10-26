@@ -3,7 +3,7 @@
 import { AnimatePresence } from "framer-motion";
 import { SidebarMenu } from "../ui/sidebar";
 import Link from "next/link";
-import { File } from "lucide-react";
+import { FileIcon } from "@phosphor-icons/react";
 
 import { FileLeaf } from "./file-leaf";
 import { FolderItem } from "./folder-item";
@@ -72,7 +72,7 @@ export function TreeItemList({
             <SidebarGroupContent>
               <SidebarMenu className="gap-0.5">
                 {group.items.map((item: NavSubPage) => {
-                  const Icon = item.icon ?? File;
+                  const Icon = item.icon ?? FileIcon;
                   const isActive = activeId === item.id;
 
                   return (
@@ -84,7 +84,7 @@ export function TreeItemList({
                         className="h-8 gap-3 px-2 text-x font-medium"
                       >
                         <Link href={item.path}>
-                          <Icon className="size-4 shrink-0 " />
+                          <Icon className="size-4 shrink-0" weight="fill" />
                           <span className="truncate">{item.name}</span>
                         </Link>
                       </SidebarMenuButton>

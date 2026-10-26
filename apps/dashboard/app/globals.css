@@ -16,6 +16,12 @@
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: var(--font-sans);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -99,12 +105,20 @@
   --destructive: hsl(0 84% 60%);
   --destructive-foreground: #ffffff;
 
+  /* Accent and status colours. Use these, never raw hex, in pages. */
+  --brand: #ff4d00;
+  --brand-foreground: #ffffff;
+  --success: hsl(142 64% 36%);
+  --success-foreground: #ffffff;
+  --warning: hsl(38 92% 45%);
+  --warning-foreground: #ffffff;
+
   --border: #e6e4dd;
   --input: #e6e4dd;
   --ring: var(--theme-text);
 
-  --chart-1: var(--theme-text);
-  --chart-2: hsl(217 91% 60%);
+  --chart-1: var(--brand);
+  --chart-2: #d6d4cd;
   --chart-3: hsl(158 74% 38%);
   --chart-4: hsl(25 95% 53%);
   --chart-5: hsl(330 81% 60%);
@@ -122,9 +136,9 @@
 }
 
 /*
- * Warm palette — dark. Nothing adds the `.dark` class yet (no theme toggle
- * ships), so this is currently unreachable. It is kept in step with the light
- * block so wiring next-themes later is a layout change and nothing more.
+ * Warm palette — dark. next-themes (`ThemeProvider` in the root layout) sets
+ * the `.dark` class on <html>; `ThemeToggle` in the header flips it. Keep it
+ * in step with the light block.
  */
 .dark {
   --theme-bg: #14120b;
@@ -156,12 +170,19 @@
   --destructive: hsl(0 84% 65%);
   --destructive-foreground: #ffffff;
 
+  --brand: #ff6a2b;
+  --brand-foreground: #ffffff;
+  --success: hsl(142 55% 50%);
+  --success-foreground: #14120b;
+  --warning: hsl(38 92% 55%);
+  --warning-foreground: #14120b;
+
   --border: #2a2820;
   --input: #2a2820;
   --ring: var(--theme-text);
 
-  --chart-1: var(--theme-text);
-  --chart-2: hsl(217 91% 65%);
+  --chart-1: var(--brand);
+  --chart-2: #3a3830;
   --chart-3: hsl(158 64% 52%);
   --chart-4: hsl(28 90% 60%);
   --chart-5: hsl(330 81% 65%);

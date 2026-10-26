@@ -1,0 +1,543 @@
+================================================================================
+ TABLE ROW SPECS — ramus-dashboard-fe   (data / behaviour only, no styling)
+ Stack: Next.js + TanStack Table v8 + react-query
+ Generated: 2026-10-23
+================================================================================
+
+0. PURPOSE
+--------------------------------------------------------------------------------
+All list pages share the same table behaviour (search, filters, sort, actions,
+pagination, empty state). Only the COLUMNS differ. Build one reusable
+<BaseTable> once; each page only supplies:
+    columns[]  +  toolbar config  +  pagination mode  +  footer noun
+
+Notation:
+  [sort]        column is sortable
+  badge(ENUM)   value shown as a status/tag, possible values in Section 2
+  date(FMT)     formatted date, format in Section 2
+  2-line(a/b)   primary value a, secondary value b under it
+  perm R/A      only visible with permission resource R, action A
+  -> path       navigates to route
+  fallback      shown when value empty
+
+
+================================================================================
+1. BASE TABLE CONTRACT
+================================================================================
+BaseTable<T>({
+  data, columns, getRowId?,
+  toolbar?: {
+    search?:  { placeholder, mode: "client"|"server", fields?: (keyof T)[] },
+    filters?: [{ columnId, allValue, allLabel, options: {value,label}[] }],  // exact match
+    sort?:    { options: {value,label}[] } | { toggleField: keyof T },      // A-Z / Z-A
+    primaryAction?: { label, onClick, permission? },
+  },
+  pagination: { mode: "client", pageSize }
+            | { mode: "server", page, limit, total, onPageChange, onLimitChange? }
+            | { mode: "none" },
+  footerNoun?,                  // "Showing X of Y <noun>"
+  loading?, error?, emptyText?,
+  onRowClick?,
+  rowSelection?: { canSelect?: (row)=>boolean, bulkActions?: [{label, onClick(rows)}] },
+  expandable?: { render: (row)=>ReactNode, single?: boolean },
+})
+
+Column helpers needed (cell kinds used across the app):
+  index, text, mono/id, 2-line, truncate(+tooltip), badge(enum), statusDot(active?),
+  date(format), currency(IDR), number, progress(%), avatar(name), icon+text,
+  link, select(checkbox), expand, actions(dropdown|inline)
+
+actions item shape:
+  { label, onClick(row), destructive?, permission?: {resource, action},
+    visibleIf?: (row)=>boolean, confirm?: { title, description(row), confirmLabel } }
+
+
+================================================================================
+2. SHARED ENUMS / FORMATS / HELPERS
+================================================================================
+2.1 Status enums (one source per domain)
+  ACTIVE_INACTIVE   active | inactive   (case-insensitive)
+  ROLE              SUPER ADMIN | FINANCE MANAGER | FIELD ENGINEER | VIEWER
+  TX_STATUS         pending | on_loan | return_pending | returned | returned_broke |
+                    declined | return_rejected | partially_approved
+  MAINT_TYPE        CORRECTIVE | PREVENTIVE
+  MAINT_CHANNEL     remote | dispatch
+  MAINT_STATUS      in_queue | in_progress | scheduled | completed("FINISH") |
+                    forwarded | canceled
+  INSTALL_STATUS    Scheduled | In Progress | Pending | Finish | Canceled
+  PO_STATUS         APPROVED | PENDING | REJECTED
+  TX_TYPE           INCOME | OUTCOME
+  PROJECT_STATUS    Done | On Progress | Canceled
+  DOC_TYPE          CA | FSR | BA | FINANCE | DRAFT
+  DOC_STATUS        PENDING | ONGOING | FINISHED
+  NOTIF_CATEGORY    MAINTENANCE | FINANCE | SYSTEM
+
+2.2 Date formats
+  DATETIME   "dd MMM yyyy HH:mm"
+  DATE_MDY   "MMM d, yyyy"
+  DATE_DMY   "dd/MM/yyyy"
+  DATE_SHORT "dd MMM yyyy"
+  RAW        already formatted string from API mapper
+
+2.3 Currency
+  IDR  Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",minimumFractionDigits:0})
+
+2.4 Helpers to centralize (currently copy-pasted)
+  formatStatus(s)        "on_loan" -> "On Loan" ; return_rejected -> "Declined"
+  getOverallStatus(txs)  ToolTransaction[] -> pending | declined | returned |
+                         return_pending | on_loan | partially_approved
+  dueDateInfo(due,status)  FINISHED -> "Finished" ; overdue & PENDING ->
+                         "Pending (Nd overdue)" ; overdue -> "Nd missed" ;
+                         <=3 days -> "Due today" | "Nd left" ; else "Nd left"
+  initials(name)         2-letter avatar text
+
+
+================================================================================
+3. PER-TABLE ROW SPECS
+================================================================================
+Paths under src/app/(main)/dashboard/
+
+------------------------------ USER MANAGEMENT ---------------------------------
+
+[T01] Users — /user-management/users — users/_components/Columns.tsx
+  row:  User {id, index, name, email, role, status, lastLogin, division}
+  cols: "#" index | "USER" [sort] 2-line(name/email) | "ROLE" [sort] badge(ROLE) |
+        "DIVISION" [sort] text | "STATUS" [sort] statusDot(Active) |
+        "LAST LOGIN" [sort] text | "ACTIONS"
+  actions: View details -> /user-management/users/{id}
+           Edit user (perm USERS/WRITE)
+           Delete user, destructive, confirm (perm USERS/DELETE)
+  toolbar: search "Search users by name, email, or role..." (client)
+           filters: Role (All Roles + roles) | Division (All Divisions + divisions) |
+                    Status (All Status, Active, Inactive)
+           sort: Newest Login | Oldest Login | Name (A-Z) | Name (Z-A)
+  page: client 10 — "users"
+
+[T02] Divisions — /user-management/divisions — divisions/_components/Columns.tsx
+  row:  DivisionListItem {id, name, division_head, staff, createdAt}
+  cols: "#" index | "DIVISION NAME" [sort] | "HEAD OF DIVISION" [sort] |
+        "STAFF" [sort] number | "CREATED AT" [sort] date(DATE_DMY) | "ACTIONS"
+  actions: View details -> /user-management/divisions/{id}
+           Edit division (perm DIVISION/WRITE)
+           Delete division, destructive, confirm (perm DIVISION/DELETE)
+  toolbar: search "Search divisions..." (server)
+  page: client 10 — "divisions"
+
+[T03] Division Members — /user-management/divisions/[id] — divisions/[id]/page.tsx
+  row:  DivisionMember {id, name, position, status}
+  cols: "NAME" | "POSITION" | "STATUS" badge(ACTIVE_INACTIVE) | "ACTIONS" inline
+  actions: Edit (perm DIVISION/WRITE) | Delete, confirm (perm DIVISION/DELETE)
+  page: server limit 10 — "Showing {from} to {to} of {total} members", numbered pages
+  empty: "No members found in this division."
+
+[T04] Permissions — /user-management/permissions — permissions/page.tsx
+  row:  Permission {id, name, resource_type, resource_identifier}
+  cols: "NAME" | "RESOURCE TYPE" badge, fallback "N/A" | "IDENTIFIER" fallback "N/A" | "ACTIONS"
+  actions: Detail | Edit | Delete, destructive, confirm
+  toolbar: search "Search permissions..." (server, explicit Search button + Enter)
+           primary "Add Permission"
+  page: server limit 10 — "Page X of Y" (hidden while searching)
+  empty: "No permissions found"
+
+[T05] Role Permission Picker — modal on /user-management/roles — roles/_components/AddRoleModal.tsx
+  row:  Permission {id, name}
+  cols: select | "Permission Name"
+  toolbar: Select All / Select All Filtered ; search "Search permissions..." (server, debounced)
+  page: server limit 10 — "{n} permissions selected"
+  row: click toggles selection ; selection kept across pages
+
+[T06] User Borrowed Tools — /user-management/users/[id] — users/_components/UserBorrowedToolsSection.tsx
+  row:  ToolTransaction {id, tool_name, quantity_borrowed, borrow_date|borrowed_at,
+        return_date|returned_at, status}
+  cols: "Tool Name" | "Quantity" | "Borrow Date" date(DATE_DMY) | "Return Date" date(DATE_DMY) |
+        "Status" badge(TX_STATUS)
+  toolbar: search "Search tools or date..." ; sort toggle by date ;
+           tabs Current / History (History = returned, returned_broke, return_rejected,
+           cancelled, declined)
+  page: client, rows per page 5/10
+  empty: "No tool records found."
+
+[T07] User Installation Records — /user-management/users/[id] — UserInstallationSection.tsx
+  row:  InstallationData {id, startDate, shipName, location, status}
+  cols: "Date" | "Ship/Client Name" | "Location" | "Status" badge(INSTALL_STATUS)
+  toolbar: search "Search ship or date..." ; sort toggle by date
+  page: client 5/10
+  row: click -> /ship-data-management/installation-data/{id}
+  empty: "No installation records found."
+
+[T08] User Maintenance Records — /user-management/users/[id] — UserMaintenanceSection.tsx
+  row:  Maintenance {id, startDate, shipName, type, problemDescription, status}
+  cols: "Date" | "Ship/Client Name" | "Type" badge(MAINT_CHANNEL) |
+        "Problem" truncate | "Status" badge(MAINT_STATUS)
+  toolbar/page: same as T07
+  row: click -> /ship-data-management/maintenance/{type}/{id}
+  empty: "No maintenance records found."
+
+---------------------------------- INVENTORY -----------------------------------
+
+[T09] Devices — /inventory/devices — devices/_components/Columns.tsx
+  row:  DeviceData {id, id_device, name, qty, status}
+  cols: "#" index | "DEVICE ID" [sort] | "NAME" [sort] | "QTY" [sort] |
+        "STATUS" [sort] statusDot(active) | "ACTIONS"
+  actions: View details | Edit | Delete, destructive, confirm
+  toolbar: search "Search by name or id..." ; filter Status (All Status, Active, Inactive)
+  page: client 10 — "items"
+
+[T10] Tools — /inventory/tools — tools/_components/Columns.tsx
+  row:  ToolData {id, id_tool, name, qty, stock, availability, price, details}
+  cols: "#" index | "Tool ID" [sort] | "NAME" [sort] |
+        "QTY" [sort] "{qty} / {stock}" + "Out of Stock" when qty<=0 |
+        "AVAILABILITY" [sort] statusDot(available) | "PRICE" [sort] currency(IDR) |
+        "DETAILS" [sort] truncate | "ACTIONS"
+  actions: View details -> /inventory/tools/{id}
+           Edit (perm TOOLS/WRITE)
+           Delete, destructive, confirm "Delete Tool" (perm TOOLS/DELETE)
+  toolbar: search "Search by name or id..." ;
+           filter Availability (All Availability, available, not available)
+  page: client 10 — "items"
+
+[T11] Tool Transaction History — /inventory/tools/[id] — tools/[id]/page.tsx
+  row:  ToolTransaction {borrower_name, borrow_date, return_date, quantity_borrowed,
+        status, photos[]}
+  cols: "Borrower" | "Borrow Date" date | "Return Date" date | "Quantity" |
+        "Status" badge(TX_STATUS) | "Photos" (preview borrow / return)
+  page: none
+  empty: "No transactions found for this tool."
+
+[T12] Loan Requests — /inventory/tools/loan-requests — loan-requests/page.tsx
+  row:  ToolBorrowRequest {id, borrower_name, created_at, transactions[]}
+  cols: select (only if a tx is pending|return_pending) | "Borrower" |
+        "Request Date" date(DATETIME) | "Items" = transactions.length |
+        "Status" badge(getOverallStatus) | "Actions" button View Details (admin modal)
+  bulk: Approve Selected / Decline Selected (confirm)
+  toolbar (server): search "Search requests..." ; date filter ;
+           sort Name (A-Z / Z-A) ; sort Date (Latest / Oldest) ; limit 5/10/20
+  page: server — "items"
+  guard: TOOLS/EXECUTE
+
+[T13] My Borrowings — /inventory/tools/my-borrowings — my-borrowings/page.tsx
+  = T12 without select column, without name sort, modal in user mode
+  toolbar: search "Search tools..." ; date filter ; sort Date ; limit 5/10/20
+
+[T14] Borrow Request Items — modal — tools/_components/BorrowRequestDetailsModal.tsx
+  row:  ToolTransaction
+  cols: select | "Tool Name" | "Qty" | "Status" badge(TX_STATUS) + detail/responsible note |
+        "Photos" | "Actions"
+  actions admin (by status):
+           Approve Borrow (pending|declined) | Decline Borrow (pending|on_loan) |
+           Approve Return (return_pending|return_rejected|returned_broke) |
+           Decline Return (return_pending|returned|returned_broke) |
+           Broken/Missing (return_pending|returned|return_rejected)
+  actions user: Cancel (pending) | Return / Edit Return (on_loan|return_rejected|return_pending)
+  bulk: admin Approve/Decline Selected ; user Return Selected
+
+--------------------------- SHIP DATA MANAGEMENT -------------------------------
+
+[T15] Companies — /ship-data-management/companies — companies/_components/CompanyTable.tsx
+  row:  ShipCompany {id, companyName, pic, phone, assets, status}
+  cols: "Nama Perusahaan" | "PIC" | "Phone" | "Assets" number |
+        "Status" badge(ACTIVE_INACTIVE) | "Aksi"
+  actions: Detail | Edit (perm COMPANY/WRITE) | Delete, confirm (perm COMPANY/DELETE)
+  toolbar: search "Cari perusahaan..." (server, debounced) ;
+           filter Status (all, active, inactive) ; sort toggle companyName
+  page: none — "perusahaan"
+  empty: "Tidak ada perusahaan yang ditemukan."
+
+[T16] Groups — /ship-data-management/groups — groups/_components/GroupTable.tsx
+  row:  Group {id, name, alias, city, company_count, created_at, updated_at}
+  cols: "No" index | "Nama Group" | "Alias" | "Kota" | "Company Count" number |
+        "Created At" date(DATETIME) | "Updated At" date(DATETIME) | "Action"
+  actions: Detail -> /ship-data-management/groups/{id} |
+           Edit (perm GROUP/WRITE) | Hapus, confirm (perm GROUP/DELETE)
+  toolbar: search "Cari group..." (server) ; sort toggle name ;
+           primary "Tambah Group" (perm GROUP/WRITE)
+  page: none — "groups"
+  empty: "Tidak ada group yang ditemukan."
+
+[T17] Ships — /ship-data-management/data-kapal — data-kapal/_components/ShipDataTable.tsx
+  row:  ShipManagement {id, alias, shipType, type, status, totalDevice, companyName}
+  cols: "Alias" | "Tipe Kapal" | "Type" tag | "Status" badge(ACTIVE_INACTIVE) |
+        "Total Device" number | "Action" inline
+  actions: Detail -> /ship-data-management/data-kapal/{id} |
+           Edit (perm SHIP_MANAGEMENT/WRITE) | Hapus (perm SHIP_MANAGEMENT/DELETE)
+  toolbar: search "Cari kapal..." (alias, id, companyName) ;
+           filter Status (all, active, inactive) ; filter Type (all, fms, ems) ;
+           sort toggle alias ; page-level Company select
+  page: none — "kapal"
+  empty: "Tidak ada kapal yang ditemukan."
+
+[T18] Ship Devices — /ship-data-management/data-kapal/[id] — data-kapal/[id]/page.tsx
+  row:  ShipDevice {id, device_name, device_status, unique_id}
+  cols: "Device Name" | "Status" badge(ACTIVE_INACTIVE) | "Unique ID" | "Actions"
+  actions: Edit | Delete, confirm (perm SHIP_MANAGEMENT WRITE/DELETE)
+  primary: Add Device
+  empty: "Belum ada device."
+
+[T19] Ship Items — same page
+  row:  ShipItem {id, item_name, status, unique_id}
+  cols: "Item Name" | "Status" badge(ACTIVE_INACTIVE) | "Unique ID" | "Actions"
+  actions: Details -> data-kapal/{id}/items/{itemId} | Edit | Delete, confirm
+  primary: Add Item
+  empty: "Belum ada item."
+
+[T20] Ship Borrowed Tools — same page
+  row:  {id, tool_name, borrower_name, quantity_borrowed, borrowed_at}
+  cols: "Tool Name" | "Borrower" | "Qty" | "Borrowed At" date(DATETIME)
+  empty: "Tidak ada alat yang sedang dipinjam."
+
+[T21] Ship Installation Records — data-kapal/[id] — ShipInstallationSection.tsx
+  = T07 (same columns, filtered by shipId)
+
+[T22] Ship Maintenance Records — data-kapal/[id] — ShipMaintenanceSection.tsx
+  = T08 (same columns, filtered by shipId)
+
+[T23] Installations — /ship-data-management/installation-data — InstallationTable.tsx
+  row:  InstallationData {id, installationId, shipName, companyName, type, startDate,
+        finishDate, location, technicians[], equipment, status, createdAt}
+  cols: "ID" [sort] | "KAPAL" [sort] | "COMPANY" [sort] | "TIPE" tag |
+        "MULAI" [sort] | "SELESAI" [sort] | "LOKASI" [sort] |
+        "TEKNISI" technicians.join(", ") | "DEVICES" truncate |
+        "STATUS" [sort] badge(INSTALL_STATUS) | "CREATED AT" [server sort] datetime |
+        "ACTION"
+  (ID + KAPAL columns pinned left)
+  actions: Detail -> installation-data/{id} | Edit (perm INSTALLATION/WRITE) |
+           Hapus, confirm (perm INSTALLATION/DELETE)
+  toolbar: search "Cari pemasangan..." ;
+           filter Status (All, Finish, Scheduled, In Progress, Canceled) ;
+           filter Type (All, FMS, EMS) ; primary "Tambah Pemasangan" (perm INSTALLATION/WRITE)
+  page: none — "pemasangan" ; default sort startDate desc
+  empty: "Tidak ada data pemasangan ditemukan."
+
+[T24] Connectivity GSM / VPN — /ship-data-management/konektivitas/{gsm|vpn} — ConnectivityTable.tsx
+  props: label "GSM" | "VPN"
+  row:  ConnectivityEntry {id, name, ip, status, createdAt, updatedAt}
+  cols: "ID" | "{label} Name" | "{label} IP" | "Status" badge(ACTIVE_INACTIVE) |
+        "Created At" | "Updated At" | "Action" inline (Edit, Hapus)
+  toolbar: search "Filter {label} nodes..." ; filter Status ; primary "Add {label}"
+  page: client — "{label} entries"
+  empty: "No entries found matching your search."
+
+[T25] Maintenance — /ship-data-management/maintenance/{remote|dispatch} — MaintenanceTable.tsx
+  props: type "remote" | "dispatch"
+  row:  Maintenance {id, shipName, problemDescription, type, technicians[], startDate,
+        endDate, createdAt, status}
+  cols: "ID" [sort] | "Kapal" [sort] | "Problem" truncate | "Tipe" badge(MAINT_TYPE) |
+        "Teknisi" join | "Mulai" | "Selesai" | "Created At" [server sort] datetime |
+        "Status" badge(MAINT_STATUS) | "Action"
+  actions: Detail -> maintenance/{type}/{id}
+           Forward (only remote, status not forwarded/completed, perm MAINTENANCE/WRITE,
+                    confirm "Teruskan Laporan ke Dispatch?")
+           Edit (perm MAINTENANCE/WRITE)
+           Hapus, confirm (perm MAINTENANCE/DELETE)
+  toolbar: search "Cari maintenance..." ;
+           filter Status: remote = All, In Queue, In Progress, Finish, Canceled
+                          dispatch = All, In Progress, Scheduled, Finish, Canceled
+           filter Type (All, Corrective, Preventive) ;
+           primary "Tambah Maintenance" (perm MAINTENANCE/WRITE)
+  page: client — "entries"
+
+[T26] Problems / Alerts — /ship-data-management/problem — problem/page.tsx
+  row:  ShipAlert {id, clientId, alertKey, level}
+  cols: "No" index | "Kapal" clientId | "Kategori" alertKey | "Level" | "Action"
+  actions: Details (opens alert detail)
+  empty: "No alerts found."
+  guard: PROBLEM
+
+(summary/_components/columns.tsx = unused template, skip)
+
+---------------------------------- FINANCE -------------------------------------
+
+[T27] Income / Outcome — /finance/income-outcome — IncomeOutcomeTable.tsx
+  row:  Transaction {id, date, description, category, account, ref, type, amount}
+  cols: "DATE" [sort] | "DESCRIPTION" [sort] | "CATEGORY" tag | "ACCOUNT" | "REF" |
+        "TYPE" badge(TX_TYPE) | "AMOUNT" [sort] currency(IDR), "+" INCOME / "-" OUTCOME |
+        "ACTIONS" inline
+  actions: Detail -> /finance/income-outcome/{id} | Edit | Hapus, confirm
+  toolbar: search "Search transactions..." (description, ref) ;
+           filter Type (All Types, INCOME, OUTCOME) ;
+           sort Date | Description | Amount | Category + asc/desc ;
+           primary "Add Transaction"
+  page: client — "transactions" ; default sort date desc
+
+[T28] Purchase Orders — /finance/purchase-order — PurchaseOrderTable.tsx
+  row:  PurchaseOrder {id, item, vendor, qty, price, category, date, status}
+  cols: "ID" [sort] | "Item" [sort] | "Vendor" [sort] | "Qty" [sort] |
+        "Price" [sort] currency(IDR) | "Category" tag | "Date" [sort] |
+        "Status" badge(PO_STATUS) | "Actions" inline
+  actions: Detail -> /finance/purchase-order/{id} | Edit | Hapus, confirm
+  toolbar: search "Search PO..." (item, vendor, id) ;
+           filter Status (All Status, APPROVED, PENDING, REJECTED) ;
+           sort ID | Item Name | Vendor | Price | Date + asc/desc ; primary "Create PO"
+  page: client — "entries"
+  empty: "No results found."
+
+---------------------------------- PROJECTS ------------------------------------
+
+[T29] Project Overview — /projects/overview — ProjectTable.tsx
+  row:  Project {id, projectId, shipName, companyName, status, progress, issue, pic,
+        targetDate, updatedAt}
+  cols: "No" index | "Project / Vessel" 2-line(shipName/projectId) | "Client" |
+        "Status" badge(PROJECT_STATUS) | "Progress" progress(%) | "Issue" truncate |
+        "PIC" | "Target Date" | "Last Update" [server sort] date | "Aksi" (pinned right)
+  actions: Detail -> /projects/overview/{id} | Edit | Delete, confirm
+  toolbar: search "Search by project, client, or status..." (client)
+  page: none
+  empty: "Belum ada data project overview"
+
+[T30] Survey — /projects/survey — SurveyTable.tsx
+  = T29 without "Progress" ; projectId -> surveyId ; detail -> /projects/survey/{id}
+  empty: "Belum ada data survey"
+
+------------------------------- NOTIFICATIONS ----------------------------------
+
+[T31] Notifications — /notification-management — notification-table.tsx
+  row:  NotificationItem {id, title, description, category, target, scheduledDate}
+  cols: "Notification Details" 2-line(title/description) | "Category" badge(NOTIF_CATEGORY) |
+        "Target" icon+text | "Scheduled Date" | "Actions"
+  actions: View -> /notification-management/{id} | Edit | Download | Delete
+  toolbar: filter Target Audience (all, managers, engineers, developers) ;
+           filter Category (all, MAINTENANCE, FINANCE, SYSTEM) ;
+           sort newest | oldest | title ; Reset
+
+------------------------------- DOCUMENTATION ----------------------------------
+
+[T32] Documents — /documentation (also /documentation/folder/[id], same columns)
+      documentation/page.tsx , documentation/folder/[id]/page.tsx
+  row:  DocumentListItem {id, doc_id, doc_type, title, client, created_by_name,
+        created_at, due_date, status, required_docs, user_can_edit, user_can_delete}
+  cols: "No" index (server offset) | "Id" doc_id | "Type" badge(DOC_TYPE) |
+        "Name" 2-line(title link -> /documentation/{id} / client) |
+        "Created By" avatar | "Created At" date(DATE_MDY) |
+        "Due Date" date(DATE_MDY) + dueDateInfo | "Status" badge(DOC_STATUS) + warning
+        if required_docs not empty and not FINISHED | "Actions"
+  actions: Detail | Edit (if row.user_can_edit) | Delete, confirm (if row.user_can_delete)
+  toolbar: sort Title (A→Z / Z→A / off) ; sort Compliance Date (Oldest / Newest) ;
+           search "Search documents..."  (main page = server, folder page = client)
+  page: main = server, rows per page 5/10/20/50 — "Showing X to Y of Z entries"
+        folder = client, same options
+  empty: "No documents found"
+
+[T33] Deleted Documents — /documentation/deleted — documentation/deleted/page.tsx
+  row:  {id, doc_id, doc_type, title, created_by_name, deleted_at}
+  cols: "No" | "Id" | "Type" | "Name" | "Created By" avatar | "Deleted At" date(DATE_MDY) |
+        "Time Left" = deleted_at + 30 days - now ("N days" | "Less than a day" |
+        "Pending permanent deletion") | "Actions"
+  actions: Restore, confirm
+  page: server, same as T32
+  empty: "Trash is empty"
+
+[T34] Available Templates — /documentation/generate — generate/page.tsx
+  row:  {id, name, status, current_version}
+  cols: "Template Name" | "Status" | "Version" "v{n}" |
+        "Actions" Use Template (enabled only status=published)
+          -> /documentation/generate/new?templateId={id}
+  page: none
+  empty: "No templates found."
+
+[T35] All Templates — /documentation/template-builder — template-builder/page.tsx
+  row:  {id, name, created_at}
+  cols: "Template Name" | "Date" date(DATE_SHORT) | "Actions" inline
+  actions: Edit -> /documentation/template-builder/{id}/edit | Delete, confirm
+  primary: New Template
+  empty: "No templates found."
+
+[T36] Document Item List (read-only) — /documentation/[id]
+  row:  {name, qty, unit_price, total}
+  cols: "Item" | "Qty" | "Unit Price" number(2dp) | "Total" number(2dp)
+  footer row: "Total Cost" = doc.total_cost
+
+---------------------------------- CRM / DEV -----------------------------------
+
+[T37] CRM Recent Leads — /crm — crm/_components/columns.crm.tsx
+  row:  {id, name, company, status, source, lastActivity}
+  cols: select | "Ref" | "Name" [sort] | "Company" | "Status" badge | "Source" badge |
+        "Last Activity" | actions
+  toolbar: column visibility ; Export
+  page: client 10
+  NOTE: already uses shared DataTable + DataTablePagination — closest to target pattern.
+
+[T38] Iteration Analysis Findings — /dev-tools/dev-iteration-analysis-check
+  row:  VesselResult {assetId, name, suspects{FLOWMETER,PLC,GPS}, sampleCount, checks}
+  cols: expand | "Vessel" | "Flowmeter" count | "PLC" count | "GPS" count |
+        "Samples" number | "Coverage" ("All checks ran" | "Not checked: …")
+  row: click expands one row at a time (findings detail)
+  empty: "No vessels with log data in this window." / "Run an analysis to see results."
+
+[T39] Replace DB CSV Preview — /dev-tools/replace-db-csv — PreviewSummary.tsx
+  row:  DatasetSummary {table, rows, willReplace, willInsert, range{start,end}, devices[]}
+  cols: "Table" | "Total" number | "Replace" number | "Insert" number |
+        "Time range" 2-line(start / "to " + end) | "Devices" list
+
+
+================================================================================
+4. EDITABLE ROW GRIDS (form tables — separate <EditableRowsTable>)
+================================================================================
+Behaviour: Add Item button ; each cell is an input ; remove row button (disabled
+when only 1 row) ; optional total footer.
+
+[G1] Borrow Tools — inventory/tools/_components/BorrowToolsModal.tsx
+     row {id, tool_id, quantity}
+     "Tool Name" select (tools with qty<=0 disabled "(Unavailable)") | "Qty" number min 1 | remove
+
+[G2] Return Tools — inventory/tools/_components/ReturnToolsModal.tsx
+     row {tx_id, quantity_returned, condition, detail, responsible}
+     "Tool Name" read-only | "Qty" number 1..quantity_borrowed |
+     "Condition" select (good, broken) |
+     "Detail / Responsible" (detail required + responsible shown only when broken)
+     (no add/remove)
+
+[G3] Document Item List — documentation/_components/DocumentFormModal.tsx
+     row {name, qty, unit_price, total}
+     "Item Name" text | "Qty" number min 1 | "Unit Price" number | "Total" = qty*unit_price
+     read-only | remove ; footer "Total Cost" = sum(total)
+
+
+================================================================================
+5. LOGIC BUGS TO NOT COPY
+================================================================================
+5.1  Status/availability filters use substring match: "Active" matches "Inactive",
+     "available" matches "not available". -> filters must use exact match.
+5.2  Several tables have pagination buttons that do nothing (Connectivity, Maintenance,
+     Income/Outcome, Purchase Order, Notifications, Company, Group, Ship, Installation).
+5.3  GroupTable and folder page sort the props array in place (mutation).
+5.4  Empty-row colSpan wrong (Ship, Installation) -> always use columns.length.
+5.5  formatStatus / TX_STATUS copies disagree on return_rejected.
+5.6  Users "Newest/Oldest Login" sorts on lastLogin which is always "-".
+5.7  Loan Requests / My Borrowings: changing search or limit does not reset page.
+5.8  Permission checks done 4 different ways, some tables have none
+     (Devices, Connectivity, Problem, Permissions, Finance, Notifications).
+
+
+================================================================================
+6. EXAMPLE PAGE AFTER REFACTOR
+================================================================================
+const columns = [
+  indexCol(),
+  twoLineCol("USER", { title: "name", subtitle: "email", sortable: true }),
+  badgeCol("role", "ROLE", "ROLE", { sortable: true }),
+  textCol("division", "DIVISION", { sortable: true }),
+  statusDotCol("status", "STATUS", (v) => v === "Active"),
+  actionsCol([
+    { label: "View details", onClick: (u) => router.push(`/dashboard/user-management/users/${u.id}`) },
+    { label: "Edit user", onClick: (u) => onEdit(u.id),
+      permission: { resource: ResourceKey.USERS, action: Permission.WRITE } },
+    { label: "Delete user", destructive: true, onClick: (u) => onDelete(u.id),
+      permission: { resource: ResourceKey.USERS, action: Permission.DELETE },
+      confirm: { title: "Delete user?", description: (u) => `Delete ${u.name}?` } },
+  ]),
+];
+
+<BaseTable
+  data={users}
+  columns={columns}
+  toolbar={{
+    search: { placeholder: "Search users by name, email, or role...", mode: "client" },
+    filters: [{ columnId: "status", allValue: "all-status", allLabel: "All Status",
+                options: [{ value: "Active", label: "Active" }, { value: "Inactive", label: "Inactive" }] }],
+  }}
+  pagination={{ mode: "client", pageSize: 10 }}
+  footerNoun="users"
+/>
+================================================================================
+END
+================================================================================

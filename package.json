@@ -7,6 +7,9 @@
     "dev:web": "bunx turbo dev --filter=web",
     "dev:api": "bunx turbo dev --filter=api",
     "dev:dashboard": "bunx turbo dev --filter=dashboard",
+    "dev:desktop": "bun run --filter built dev",
+    "dist:linux": "bun run --filter built dist:linux",
+    "dist:win": "bun run --filter built dist:win",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
@@ -32,5 +35,13 @@
   "workspaces": [
     "apps/*",
     "packages/*"
+  ],
+  "dependencies": {
+    "@tanstack/react-query": "^5.104.5",
+    "@trpc/tanstack-react-query": "^11.19.0",
+    "superjson": "^2.2.6"
+  },
+  "trustedDependencies": [
+    "electron"
   ]
 }

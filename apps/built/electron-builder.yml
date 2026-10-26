@@ -1,0 +1,25 @@
+appId: asia.ramus.pelintir
+productName: Pelintir
+directories:
+  output: release
+files:
+  - dist/**
+  - package.json
+  # Main process has no runtime deps; keep root workspace deps out of the asar.
+  - "!**/node_modules/**"
+asar: true
+# Next standalone server runs from real files, outside the asar.
+extraResources:
+  - from: server
+    to: server
+linux:
+  target: [AppImage, deb]
+  category: Office
+  executableName: pelintir
+  syncDesktopName: true
+  artifactName: pelintir-${version}-${arch}.${ext}
+win:
+  target: nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
