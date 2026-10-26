@@ -14,7 +14,7 @@ import { PdfFrame } from "@/components/pdf-preview";
 import { type Document, documentsApi } from "@/components/tables/documentation";
 import { type Adapter, keyOf, keyed } from "@/lib/api";
 import { MOCK, type Raw, fetchAll, request, toForm, useFetch } from "@/lib/http";
-import { X, useAuth } from "@/lib/auth";
+import { W, X, useAuth } from "@/lib/auth";
 
 // File storage on the documentation backend: folders + one document per uploaded file.
 export type StoredItem = {
@@ -117,6 +117,26 @@ const filesApi = (cwd?: string): Adapter<StoredItem> => {
   };
 };
 
+const toRows = (files: File[], cwd?: string): StoredItem[] =>
+  files.map((file) => ({
+    id: "",
+    kind: "file",
+    name: file.name,
+    parent: cwd,
+    created_at: new Date().toISOString(),
+    user_can_edit: true,
+    user_can_delete: true,
+    file,
+  }));
+
+/** Dropped files; folders are skipped (they'd upload as empty files). */
+const dropped = (dt: DataTransfer) => {
+  const entries = [...dt.items].filter((i) => i.kind === "file");
+  if (!entries.some((i) => i.webkitGetAsEntry)) return { files: [...dt.files], skipped: 0 };
+  const files = entries.flatMap((i) => (i.webkitGetAsEntry()?.isFile ? [i.getAsFile()!] : []));
+  return { files, skipped: entries.length - files.length };
+};
+
 export const FilesTable = () => {
   const [trail, setTrail] = React.useState<{ id: string; name: string }[]>([]);
   const cwd = trail.at(-1)?.id;
@@ -125,11 +145,65 @@ export const FilesTable = () => {
   const [previewing, setPreviewing] = React.useState<StoredItem>();
   const queryClient = useQueryClient();
   const { can } = useAuth();
+  const [status, setStatus] = React.useState<{ busy?: number; error?: string }>({});
+  const [dragging, setDragging] = React.useState(false);
+  const depth = React.useRef(0);
 
   const open = (x: StoredItem) => setTrail((t) => [...t, { id: x.id, name: x.name }]);
 
+  /** Live upload, one document per file; reloads once even if one fails. */
+  const uploadAll = async (rows: StoredItem[]) => {
+    try {
+      for (const r of rows) await api.save!(r);
+    } finally {
+      await queryClient.invalidateQueries({ queryKey: keyOf(api) });
+    }
+  };
+
+  const droppable = !MOCK && can(PERM, W);
+  const isFiles = (e: React.DragEvent) => droppable && e.dataTransfer.types.includes("Files");
+  const drop = {
+    onDragEnter: (e: React.DragEvent) => {
+      if (!isFiles(e)) return;
+      e.preventDefault();
+      depth.current++;
+      setDragging(true);
+    },
+    onDragOver: (e: React.DragEvent) => {
+      if (isFiles(e)) e.preventDefault();
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      if (!isFiles(e) || --depth.current > 0) return;
+      depth.current = 0;
+      setDragging(false);
+    },
+    onDrop: async (e: React.DragEvent) => {
+      if (!isFiles(e)) return;
+      e.preventDefault();
+      depth.current = 0;
+      setDragging(false);
+      const { files, skipped } = dropped(e.dataTransfer);
+      const note = skipped ? `${skipped} folder${skipped > 1 ? "s" : ""} skipped.` : undefined;
+      if (!files.length) return setStatus({ error: note });
+      setStatus({ busy: files.length });
+      try {
+        await uploadAll(toRows(files, cwd));
+        setStatus({ error: note });
+      } catch (err) {
+        setStatus({ error: [(err as Error).message, note].filter(Boolean).join(" ") });
+      }
+    },
+  };
+
   return (
-    <>
+    <div className="relative flex flex-col gap-2" {...drop}>
+      {status.busy ? (
+        <p className="text-sm text-muted-foreground">
+          Uploading {status.busy} file{status.busy > 1 ? "s" : ""}...
+        </p>
+      ) : (
+        status.error && <p className="text-sm text-destructive">{status.error}</p>
+      )}
       <ResourceTable
         key={cwd ?? "root"}
         title="Files"
@@ -200,17 +274,18 @@ export const FilesTable = () => {
             onUpload={async (rows) => {
               // Mock: local rows via the table. Live: save all, then one reload.
               if (MOCK) return void (await Promise.all(rows.map(p.onSave)));
-              try {
-                for (const r of rows) await api.save!(r);
-              } finally {
-                await queryClient.invalidateQueries({ queryKey: keyOf(api) });
-              }
+              await uploadAll(rows);
             }}
           />
         )}
         noun="items"
         emptyLabel="This folder is empty"
       />
+      {dragging && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-background/80 text-sm font-medium">
+          Drop files to upload to {trail.at(-1)?.name ?? "My Files"}
+        </div>
+      )}
       <FormShell
         open={newFolder}
         title="New Folder"
@@ -240,7 +315,7 @@ export const FilesTable = () => {
           {previewing && <FilePreview key={previewing.id} item={previewing} />}
         </DialogContent>
       </Dialog>
-    </>
+    </div>
   );
 };
 
@@ -279,20 +354,7 @@ function UploadDialog({
       onClose={onClose}
       onSubmit={async (f) => {
         if (editing) return onSave({ ...(row as StoredItem), name: String(f.get("name")).trim() });
-        return onUpload(
-          (f.getAll("files") as File[])
-            .filter((x) => x.size || x.name)
-            .map((file) => ({
-              id: "",
-              kind: "file",
-              name: file.name,
-              parent: cwd,
-              created_at: new Date().toISOString(),
-              user_can_edit: true,
-              user_can_delete: true,
-              file,
-            })),
-        );
+        return onUpload(toRows((f.getAll("files") as File[]).filter((x) => x.size || x.name), cwd));
       }}
     >
       {editing ? (
