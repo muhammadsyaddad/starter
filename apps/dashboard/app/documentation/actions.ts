@@ -13,11 +13,11 @@ export type Kind = keyof typeof ext;
 
 const file = (kind: Kind, name: string) => {
   if (!/^[\w-]+$/.test(name)) throw new Error(`Bad name: ${name}`);
-  return join(DATA_DIR, kind, name + ext[kind]);
+  return join(/*turbopackIgnore: true*/ DATA_DIR, kind, name + ext[kind]);
 };
 
 export async function list(kind: Kind) {
-  const files = await readdir(join(DATA_DIR, kind)).catch(() => []);
+  const files = await readdir(join(/*turbopackIgnore: true*/ DATA_DIR, kind)).catch(() => []);
   return files.filter((f) => f.endsWith(ext[kind])).map((f) => f.slice(0, -ext[kind].length));
 }
 
@@ -27,7 +27,7 @@ export async function read(kind: Kind, name: string) {
 
 export async function write(kind: Kind, name: string, content: string) {
   const path = file(kind, name);
-  await mkdir(join(path, ".."), { recursive: true });
+  await mkdir(join(/*turbopackIgnore: true*/ path, ".."), { recursive: true });
   await writeFile(path, content);
 }
 
