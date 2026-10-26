@@ -25,6 +25,7 @@ import {
   UserListIcon,
   TreeStructureIcon,
   IdentificationBadgeIcon,
+  FolderIcon,
 } from "@phosphor-icons/react";
 
 export interface NavSubPage {
@@ -210,35 +211,48 @@ export const navigationData: NavGroup[] = [
     ],
   },
   {
-    id: "group-documentation",
-    title: "Documentation",
+    id: "group-paperwork",
+    title: "Paperwork",
     items: [
       {
-        id: "docs-documentation",
-        name: "Documentation",
+        id: "paperwork-documents",
+        name: "Documents",
         icon: FilesIcon,
         path: "/documentation",
         perm: "DOCUMENTATION",
       },
       {
-        id: "docs-deleted",
+        id: "paperwork-deleted",
         name: "Deleted Documents",
         icon: TrashIcon,
         path: "/documentation/deleted",
         perm: "DOCUMENTATION",
       },
       {
-        id: "docs-template-builder",
+        id: "paperwork-template-builder",
         name: "Template Builder",
         icon: GearIcon,
         path: "/documentation/template-builder",
         perm: "TEMPLATE_BUILDER",
       },
       {
-        id: "docs-generate",
+        id: "paperwork-generate",
         name: "Generate Document",
         icon: FilesIcon,
         path: "/documentation/generate",
+      },
+    ],
+  },
+  {
+    id: "group-file-storage",
+    title: "File Storage",
+    items: [
+      {
+        id: "file-storage",
+        name: "Files",
+        icon: FolderIcon,
+        path: "/files",
+        perm: "DOCUMENTATION",
       },
     ],
   },

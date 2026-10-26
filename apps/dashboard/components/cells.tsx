@@ -148,6 +148,7 @@ export const avatar = <T,>(key: Key<T>, header: string, sort?: boolean) =>
 export function dueDateInfo(due: string, status: string) {
   if (status === "FINISHED") return "Finished";
   const d = differenceInCalendarDays(new Date(due), new Date());
+  if (Number.isNaN(d)) return "";
   if (d < 0) return status === "PENDING" ? `Pending (${-d}d overdue)` : `${-d}d missed`;
   return d === 0 ? "Due today" : `${d}d left`;
 }

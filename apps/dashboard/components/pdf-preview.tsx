@@ -13,10 +13,15 @@ export function PdfPreview({ result, name = "document" }: { result: PdfResult; n
 
   if (result?.error) return <pre className="overflow-auto rounded-md border p-3 text-xs text-destructive">{result.error}</pre>;
   if (!url) return null;
+  return <PdfFrame url={url} file={`${name}.pdf`} />;
+}
+
+/** Download link + inline viewer for a PDF already at `url`. */
+export function PdfFrame({ url, file }: { url: string; file: string }) {
   return (
     <div className="flex flex-col gap-2">
-      <a href={url} download={`${name}.pdf`} className="text-sm underline">
-        Download {name}.pdf
+      <a href={url} download={file} className="text-sm underline">
+        Download {file}
       </a>
       <iframe src={url} className="h-[80vh] w-full rounded-md border" />
     </div>
